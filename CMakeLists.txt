@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.6)
+cmake_minimum_required(VERSION 3.13)
 
 ## Version Configuration.
 ## Define e.g. 0.72 as major 0 and minor 72
@@ -12,13 +12,14 @@ option(DH_DEBUG_CDC_FLASH "Enable CDC command to trigger bootloader mode" OFF)
 ## Hardware Configuration
 set(DP_PIN_DEFAULT 14 CACHE STRING "Default USB D+ Pin Number")
 set(PIO_USE_TINYUSB 1 CACHE STRING "Make TinyUSB Manage the PIO USB Port")
-set(PICO_BOARD "pico")
+set(PICO_BOARD "pico" CACHE STRING "Target board: 'pico' (RP2040) or 'pico2_w' (RP2350 + CYW43439). See issue #2.")
 
 ## Pico SDK Configuration
 set(PICO_SDK_FETCH_FROM_GIT off)
 set(PICO_SDK_PATH ${CMAKE_CURRENT_LIST_DIR}/pico-sdk)
 set(SRC_DIR ${CMAKE_CURRENT_LIST_DIR}/src)
-include(${PICO_SDK_PATH}/pico_sdk_import.cmake)
+# SDK 2.x moved pico_sdk_import.cmake from the SDK root into external/.
+include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 
 ## Project Setup
 project(deskhop_project C CXX ASM)
@@ -27,7 +28,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(PICO_COPY_TO_RAM 1)
 
 ## Compiler Flags
-set(CMAKE_C_FLAGS "-Ofast -Wall -mcpu=cortex-m0plus -mtune=cortex-m0plus -fstack-usage")
+## NOTE: -mcpu / -mtune are intentionally not set here — the SDK toolchain file
+## (selected by PICO_COMPILER) already sets platform-appropriate flags:
+##   rp2040 -> pico_arm_cortex_m0plus_gcc -> -mcpu=cortex-m0plus
+##   rp2350 -> pico_arm_cortex_m33_gcc    -> -mcpu=cortex-m33
+## We APPEND project-specific flags to preserve those toolchain-set values.
+## Plain `set(CMAKE_C_FLAGS "...")` would wipe them out and break the build.
+string(APPEND CMAKE_C_FLAGS " -Ofast -Wall -fstack-usage")
 
 ## Initialize Pico SDK
 pico_sdk_init()
@@ -99,13 +106,23 @@ set(binary deskhop)
 
 ## Disk Image Configuration
 # This assembles disk.S, then updates the elf section in post-build
-# With the disk FAT image binary in /disk/disk.img 
+# With the disk FAT image binary in /disk/disk.img
+#
+# The disk-image, firmware-metadata, and firmware-staging sections rely on the
+# custom flash layout in misc/memory_map.ld, which currently only targets RP2040.
+# For RP2350 / Pico 2 W builds these features are disabled until the linker
+# script is ported. Tracked in issue #14.
 
 set(DISK_ASM "${CMAKE_CURRENT_LIST_DIR}/disk/disk.S")
 set(DISK_BIN "${CMAKE_CURRENT_LIST_DIR}/disk/disk.img")
 set_property(SOURCE ${DISK_ASM} APPEND PROPERTY COMPILE_OPTIONS "-x" "assembler-with-cpp")
 
-add_executable(${binary} ${DISK_ASM})
+if(PICO_PLATFORM STREQUAL "rp2040")
+    add_executable(${binary} ${DISK_ASM})
+else()
+    add_executable(${binary})
+    message(STATUS "Custom flash layout disabled for ${PICO_PLATFORM} — web-config disk and OTA firmware exchange unavailable on this target (issue #14).")
+endif()
 
 target_sources(${binary} PUBLIC ${COMMON_SOURCES})
 target_compile_definitions(${binary} 
@@ -132,7 +149,10 @@ target_link_libraries(${binary} PUBLIC ${COMMON_LINK_LIBRARIES})
 ## Configure Pico Library
 pico_enable_stdio_usb(${binary} 0)
 pico_enable_stdio_uart(${binary} 0)
-pico_set_linker_script(${binary} ${CMAKE_SOURCE_DIR}/misc/memory_map.ld)
+
+if(PICO_PLATFORM STREQUAL "rp2040")
+    pico_set_linker_script(${binary} ${CMAKE_SOURCE_DIR}/misc/memory_map.ld)
+endif()
 
 ## Build other file formats as well
 pico_add_extra_outputs(${binary})
@@ -141,14 +161,23 @@ pico_add_extra_outputs(${binary})
 math(EXPR FIRMWARE_VERSION "${VERSION_MAJOR} * 1000 + ${VERSION_MINOR} + 100")
 
 ## Post-Build Commands
-add_custom_command(
-    TARGET ${binary} POST_BUILD
-    COMMAND python3 ${CMAKE_SOURCE_DIR}/misc/crc32.py ${binary}.bin ${binary}.crc ${FIRMWARE_VERSION}
-    COMMAND ${CMAKE_OBJCOPY} --update-section .section_metadata=${binary}.crc ${binary}.elf
-    COMMAND ${CMAKE_OBJCOPY} -O binary ${binary}.elf ${binary}.bin
-    COMMAND ${CMAKE_BINARY_DIR}/elf2uf2/elf2uf2 ${binary}.elf ${binary}.uf2
-    COMMENT "Update CRC32 section to match the actual binary"  
-)
+## CRC32 / .section_metadata update relies on the custom flash layout in
+## misc/memory_map.ld (RP2040 only). On RP2350 / Pico 2 W we fall back to
+## pico_add_extra_outputs() above for .bin / .uf2 generation, without the
+## firmware-metadata CRC patch. Tracked in issue #14.
+if(PICO_PLATFORM STREQUAL "rp2040")
+    # SDK 2.x replaces the standalone `elf2uf2` binary with picotool's `uf2 convert`
+    # subcommand. The picotool CMake target is imported by pico_add_extra_outputs above,
+    # so $<TARGET_FILE:picotool> resolves to the right executable at build time.
+    add_custom_command(
+        TARGET ${binary} POST_BUILD
+        COMMAND python3 ${CMAKE_SOURCE_DIR}/misc/crc32.py ${binary}.bin ${binary}.crc ${FIRMWARE_VERSION}
+        COMMAND ${CMAKE_OBJCOPY} --update-section .section_metadata=${binary}.crc ${binary}.elf
+        COMMAND ${CMAKE_OBJCOPY} -O binary ${binary}.elf ${binary}.bin
+        COMMAND $<TARGET_FILE:picotool> uf2 convert ${binary}.elf -t elf ${binary}.uf2
+        COMMENT "Update CRC32 section to match the actual binary"
+    )
+endif()
 
 ## Linker Options
 target_link_options(${binary} PRIVATE

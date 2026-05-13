@@ -55,9 +55,13 @@ It also remembers the LED state for each computer, so you can pick up exactly ho
 
 ## How to build
 
-To avoid version mismatch and reported path issues when building, as well as to save you from having to download a large SDK, the project now bundles minimal pico sdk and tinyusb.
+This fork tracks the pico-sdk as a git submodule pinned to a specific release (currently `2.2.0`) so the build can target both the original Pi Pico (RP2040) and the Pi Pico 2 W (RP2350 + CYW43439). After cloning, initialise the submodule and its transitive dependencies (tinyusb, btstack, cyw43-driver, lwip, mbedtls):
 
-On a Debian/Ubuntu systems, make sure to install these:
+```shell
+git submodule update --init --recursive
+```
+
+On Debian/Ubuntu systems, install the toolchain:
 
 ```shell
 apt update
@@ -69,12 +73,21 @@ apt install \
     python3
 ```
 
-You should be able to build by running:
+### Building for the original Pi Pico (default)
 
 ```shell
 cmake -S . -B build
 cmake --build build
 ```
+
+### Building for the Pi Pico 2 W
+
+```shell
+cmake -S . -B build-pico2w -DPICO_BOARD=pico2_w
+cmake --build build-pico2w
+```
+
+Note: the Pi Pico 2 W build currently lacks the custom flash layout used by the web-config disk and OTA firmware-exchange features — these are tracked in [issue #14](https://github.com/bitwisebytefoolish/deskhop-bt/issues/14) and depend on porting `misc/memory_map.ld` to the RP2350 memory map.
 
 additionally, to rebuild web UI check webconfig/ and execute ```./render.py```, you'll need jinja2 installed.
 
