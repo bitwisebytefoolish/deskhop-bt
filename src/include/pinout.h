@@ -24,6 +24,17 @@
 #define GPIO_LED_PIN   25 // LED is connected to pin 25 on a PICO
 #define PIO_USB_DP_PIN 14 // D+ is pin 14, D- is pin 15
 
+/* Bitmask passed to reset_usb_boot() to flash the on-board LED while in
+   BOOTSEL mode. On the original Pico this is (1 << GPIO 25). On Pico W /
+   Pico 2 W the LED is a virtual GPIO inside the CYW43 module — the
+   bootloader cannot reach it from a regular GPIO bitmask, so we pass 0
+   and the device enters BOOTSEL without a blink indicator. */
+#ifdef PICO_DEFAULT_LED_PIN
+#define DESKHOP_BOOT_LED_MASK (1u << PICO_DEFAULT_LED_PIN)
+#else
+#define DESKHOP_BOOT_LED_MASK 0u
+#endif
+
 /*==============================================================================
  *  Serial Pins
  *==============================================================================*/

@@ -214,9 +214,9 @@ void initial_setup(device_t *state) {
     /* Search the persistent storage sector in flash for valid config or use defaults */
     load_config(state);
 
-    /* Init and enable the on-board LED GPIO as output */
-    gpio_init(GPIO_LED_PIN);
-    gpio_set_dir(GPIO_LED_PIN, GPIO_OUT);
+    /* Initialise the on-board LED (platform-specific — direct GPIO on the
+       original Pico, CYW43 virtual GPIO on Pi Pico W / 2 W). */
+    deskhop_led_init();
 
     /* Check if we should boot in configuration mode or not */
     state->config_mode_active = is_config_mode_active(state);

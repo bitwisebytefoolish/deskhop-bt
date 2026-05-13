@@ -53,7 +53,7 @@ void screen_border_hotkey_handler(device_t *state, hid_keyboard_report_t *report
 
 /* This key combo puts board A in firmware upgrade mode */
 void fw_upgrade_hotkey_handler_A(device_t *state, hid_keyboard_report_t *report) {
-    reset_usb_boot(1 << PICO_DEFAULT_LED_PIN, 0);
+    reset_usb_boot(DESKHOP_BOOT_LED_MASK, 0);
 };
 
 /* This key combo puts board B in firmware upgrade mode */
@@ -198,7 +198,7 @@ void handle_output_select_msg(uart_packet_t *packet, device_t *state) {
 
 /* On firmware upgrade message, reboot into the BOOTSEL fw upgrade mode */
 void handle_fw_upgrade_msg(uart_packet_t *packet, device_t *state) {
-    reset_usb_boot(1 << PICO_DEFAULT_LED_PIN, 0);
+    reset_usb_boot(DESKHOP_BOOT_LED_MASK, 0);
 }
 
 /* Comply with request to turn mouse zoom mode on/off  */

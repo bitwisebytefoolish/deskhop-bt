@@ -156,7 +156,7 @@ void heartbeat_output_task(device_t *state) {
 #ifdef DH_DEBUG
     /* Holding the button invokes bootsel firmware upgrade */
     if (is_bootsel_pressed())
-        reset_usb_boot(1 << PICO_DEFAULT_LED_PIN, 0);
+        reset_usb_boot(DESKHOP_BOOT_LED_MASK, 0);
 #endif
 
     uart_packet_t packet = {
@@ -205,7 +205,7 @@ void firmware_upgrade_task(device_t *state) {
         /* Checksum mismatch, we wipe the stage 2 bootloader and rely on ROM recovery */
         if(calculate_firmware_crc32() != state->fw.checksum) {
             flash_range_erase((uint32_t)ADDR_FW_RUNNING - XIP_BASE, FLASH_SECTOR_SIZE);
-            reset_usb_boot(1 << PICO_DEFAULT_LED_PIN, 0);
+            reset_usb_boot(DESKHOP_BOOT_LED_MASK, 0);
         }
 
         else {
