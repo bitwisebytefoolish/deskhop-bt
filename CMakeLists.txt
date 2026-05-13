@@ -25,7 +25,16 @@ include(${PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 project(deskhop_project C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
-set(PICO_COPY_TO_RAM 1)
+
+## PICO_COPY_TO_RAM is an RP2040-era speed optimisation that runs all .text
+## from SRAM after copying it out of flash at boot. On RP2350 the XIP cache
+## is fast enough that copy-to-RAM hurts more than it helps — particularly
+## because the cyw43-driver firmware blob (~240 KB) is .rodata and gets
+## dragged into RAM, blowing the budget on Pico W and consuming most of
+## the Pi Pico 2 W's 512 KB SRAM. Apply only to known RP2040 boards.
+if(PICO_BOARD STREQUAL "pico" OR PICO_BOARD STREQUAL "pico_w")
+    set(PICO_COPY_TO_RAM 1)
+endif()
 
 ## Compiler Flags
 ## NOTE: -mcpu / -mtune are intentionally not set here — the SDK toolchain file
@@ -121,24 +130,15 @@ endif()
 set(binary deskhop)
 
 ## Disk Image Configuration
-# This assembles disk.S, then updates the elf section in post-build
-# With the disk FAT image binary in /disk/disk.img
-#
-# The disk-image, firmware-metadata, and firmware-staging sections rely on the
-# custom flash layout in misc/memory_map.ld, which currently only targets RP2040.
-# For RP2350 / Pico 2 W builds these features are disabled until the linker
-# script is ported. Tracked in issue #14.
+# Assembles disk.S into .section_disk, then the post-build step patches
+# the firmware CRC into .section_metadata. Both sections are provided by
+# misc/memory_map.ld (rp2040) and misc/memory_map_rp2350.ld (rp2350).
 
 set(DISK_ASM "${CMAKE_CURRENT_LIST_DIR}/disk/disk.S")
 set(DISK_BIN "${CMAKE_CURRENT_LIST_DIR}/disk/disk.img")
 set_property(SOURCE ${DISK_ASM} APPEND PROPERTY COMPILE_OPTIONS "-x" "assembler-with-cpp")
 
-if(PICO_PLATFORM STREQUAL "rp2040")
-    add_executable(${binary} ${DISK_ASM})
-else()
-    add_executable(${binary})
-    message(STATUS "Custom flash layout disabled for ${PICO_PLATFORM} — web-config disk and OTA firmware exchange unavailable on this target (issue #14).")
-endif()
+add_executable(${binary} ${DISK_ASM})
 
 target_sources(${binary} PUBLIC ${COMMON_SOURCES})
 target_compile_definitions(${binary}
@@ -170,8 +170,15 @@ target_link_libraries(${binary} PUBLIC ${COMMON_LINK_LIBRARIES})
 pico_enable_stdio_usb(${binary} 0)
 pico_enable_stdio_uart(${binary} 0)
 
+## Custom flash layout linker script — per-platform variant so both the
+## RP2040 and RP2350 builds get the deskhop sections (.section_disk,
+## .section_metadata, .section_staging, .section_config).
 if(PICO_PLATFORM STREQUAL "rp2040")
     pico_set_linker_script(${binary} ${CMAKE_SOURCE_DIR}/misc/memory_map.ld)
+elseif(PICO_PLATFORM MATCHES "^rp2350")
+    pico_set_linker_script(${binary} ${CMAKE_SOURCE_DIR}/misc/memory_map_rp2350.ld)
+else()
+    message(WARNING "No custom linker script for PICO_PLATFORM=${PICO_PLATFORM}; using SDK default. Web-config disk and OTA features will be unavailable.")
 endif()
 
 ## Build other file formats as well
@@ -181,14 +188,12 @@ pico_add_extra_outputs(${binary})
 math(EXPR FIRMWARE_VERSION "${VERSION_MAJOR} * 1000 + ${VERSION_MINOR} + 100")
 
 ## Post-Build Commands
-## CRC32 / .section_metadata update relies on the custom flash layout in
-## misc/memory_map.ld (RP2040 only). On RP2350 / Pico 2 W we fall back to
-## pico_add_extra_outputs() above for .bin / .uf2 generation, without the
-## firmware-metadata CRC patch. Tracked in issue #14.
-if(PICO_PLATFORM STREQUAL "rp2040")
-    # SDK 2.x replaces the standalone `elf2uf2` binary with picotool's `uf2 convert`
-    # subcommand. The picotool CMake target is imported by pico_add_extra_outputs above,
-    # so $<TARGET_FILE:picotool> resolves to the right executable at build time.
+## CRC32 / .section_metadata update — now runs on both rp2040 and rp2350
+## (both linker scripts provide .section_metadata). SDK 2.x replaces the
+## standalone `elf2uf2` binary with picotool's `uf2 convert` subcommand;
+## $<TARGET_FILE:picotool> resolves at build time to the picotool imported
+## by pico_add_extra_outputs above.
+if(PICO_PLATFORM STREQUAL "rp2040" OR PICO_PLATFORM MATCHES "^rp2350")
     add_custom_command(
         TARGET ${binary} POST_BUILD
         COMMAND python3 ${CMAKE_SOURCE_DIR}/misc/crc32.py ${binary}.bin ${binary}.crc ${FIRMWARE_VERSION}
