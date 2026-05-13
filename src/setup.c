@@ -15,6 +15,13 @@
 
 #include "main.h"
 
+/* CYW43_WL_GPIO_LED_PIN is defined by the board header on boards that carry
+   the CYW43439 module (Pico W, Pico 2 W). Same discriminator used in led.c.
+   The C-level PICO_CYW43_SUPPORTED isn't a thing — it's a CMake-only var. */
+#ifdef CYW43_WL_GPIO_LED_PIN
+#include "pico/cyw43_arch.h"
+#endif
+
 /* ================================================== *
  * Perform initial UART setup
  * ================================================== */
@@ -213,6 +220,18 @@ void initial_setup(device_t *state) {
 
     /* Search the persistent storage sector in flash for valid config or use defaults */
     load_config(state);
+
+#ifdef CYW43_WL_GPIO_LED_PIN
+    /* Initialise the CYW43439 wireless module. Must run before deskhop_led_init()
+       because on these boards the on-board LED is a virtual GPIO inside the
+       wireless module — cyw43_arch_gpio_put fails without this. BTstack will
+       also use this radio once #6 / #9 are wired up. */
+    if (cyw43_arch_init() != 0) {
+        /* If radio init fails there's nothing useful we can do — sit on it so
+           the watchdog reboots us, rather than running with a half-up device. */
+        while (1) tight_loop_contents();
+    }
+#endif
 
     /* Initialise the on-board LED (platform-specific — direct GPIO on the
        original Pico, CYW43 virtual GPIO on Pi Pico W / 2 W). */
