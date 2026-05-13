@@ -104,11 +104,19 @@ set(COMMON_LINK_LIBRARIES
 )
 
 ## On boards with the CYW43439 module (Pico W, Pico 2 W) the on-board LED is
-## a virtual GPIO inside the wireless module rather than a real MCU pin.
-## Reaching it requires the cyw43_arch library. Link the "none" variant here
-## (LED-only, no Wi-Fi or BT) — issue #4 will swap to a BT-capable variant.
+## a virtual GPIO inside the wireless module rather than a real MCU pin,
+## reachable via cyw43_arch_gpio_*. The Bluetooth radio also sits on the
+## same module and is driven through BTstack via cyw43_arch.
+##
+## We link the `threadsafe_background` variant — it runs CYW43 callbacks on
+## an internal background context (IRQ + alarm pool), so deskhop's existing
+## core1 task scheduler doesn't need to poll cyw43_arch_poll() itself. The
+## non-lwip variant is chosen because we don't need Wi-Fi networking.
+##
+## BTstack itself is not linked here — that comes with the hid_host work
+## (#6 keyboard, #9 mouse).
 if(PICO_CYW43_SUPPORTED)
-    list(APPEND COMMON_LINK_LIBRARIES pico_cyw43_arch_none)
+    list(APPEND COMMON_LINK_LIBRARIES pico_cyw43_arch_threadsafe_background)
 endif()
 set(binary deskhop)
 
@@ -133,12 +141,16 @@ else()
 endif()
 
 target_sources(${binary} PUBLIC ${COMMON_SOURCES})
-target_compile_definitions(${binary} 
+target_compile_definitions(${binary}
     PRIVATE
     VERSION_MAJOR=${VERSION_MAJOR}
     VERSION_MINOR=${VERSION_MINOR}
     PIO_USB_USE_TINYUSB=${PIO_USE_TINYUSB}
     PIO_USB_DP_PIN_DEFAULT=${DP_PIN_DEFAULT}
+    # We use cyw43_arch only for the LED and Bluetooth — not Wi-Fi.
+    # Setting CYW43_LWIP=0 keeps cyw43.h from pulling in lwip/netif.h,
+    # which we don't ship lwipopts.h for. Revisit if we ever need Wi-Fi.
+    $<$<BOOL:${PICO_CYW43_SUPPORTED}>:CYW43_LWIP=0>
     __disk_file_path__="${DISK_BIN}"
 )
 
