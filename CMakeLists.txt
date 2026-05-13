@@ -96,12 +96,20 @@ set(COMMON_LINK_LIBRARIES
   hardware_pio
   hardware_dma
 
-  tinyusb_device 
+  tinyusb_device
   tinyusb_host
   pico_multicore
   pico_unique_id
   Pico-PIO-USB
 )
+
+## On boards with the CYW43439 module (Pico W, Pico 2 W) the on-board LED is
+## a virtual GPIO inside the wireless module rather than a real MCU pin.
+## Reaching it requires the cyw43_arch library. Link the "none" variant here
+## (LED-only, no Wi-Fi or BT) — issue #4 will swap to a BT-capable variant.
+if(PICO_CYW43_SUPPORTED)
+    list(APPEND COMMON_LINK_LIBRARIES pico_cyw43_arch_none)
+endif()
 set(binary deskhop)
 
 ## Disk Image Configuration

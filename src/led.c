@@ -12,6 +12,44 @@
 #include "main.h"
 
 /* ==================================================== *
+ * ========== Platform-specific LED I/O       ========== *
+ * ==================================================== *
+ *
+ * On the original Pi Pico, GPIO 25 is wired directly to the on-board LED
+ * and can be driven with the standard hardware/gpio routines.
+ *
+ * On the Pi Pico W and Pi Pico 2 W, GPIO 25 is repurposed as WL_CS — the
+ * SPI chip-select line to the CYW43439 wireless module. The on-board LED
+ * is instead exposed as a virtual GPIO inside the CYW43 module, accessed
+ * via cyw43_arch_gpio_put / cyw43_arch_gpio_get. Driving GPIO 25 directly
+ * on these boards would assert chip-select on the radio and corrupt any
+ * Bluetooth or Wi-Fi traffic in flight.
+ *
+ * The board headers define CYW43_WL_GPIO_LED_PIN only on boards with the
+ * CYW43 module, so we use that as the compile-time discriminator.
+ *
+ * Note: the CYW43 path requires cyw43_arch_init() to have been called
+ * before any of these helpers fire — wired up in issue #4.
+ */
+
+#ifdef CYW43_WL_GPIO_LED_PIN
+#include "pico/cyw43_arch.h"
+static inline void deskhop_led_put(bool v) { cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, v); }
+static inline bool deskhop_led_get(void)   { return cyw43_arch_gpio_get(CYW43_WL_GPIO_LED_PIN); }
+#else
+static inline void deskhop_led_put(bool v) { gpio_put(GPIO_LED_PIN, v); }
+static inline bool deskhop_led_get(void)   { return gpio_get(GPIO_LED_PIN); }
+#endif
+
+void deskhop_led_init(void) {
+#ifndef CYW43_WL_GPIO_LED_PIN
+    gpio_init(GPIO_LED_PIN);
+    gpio_set_dir(GPIO_LED_PIN, GPIO_OUT);
+#endif
+    /* On CYW43 boards the LED virtual GPIO is set up by cyw43_arch_init() — #4. */
+}
+
+/* ==================================================== *
  * ========== Update pico and keyboard LEDs  ========== *
  * ==================================================== */
 
@@ -32,7 +70,7 @@ void set_keyboard_leds(uint8_t requested_led_state, device_t *state) {
 void restore_leds(device_t *state) {
     /* Light up on-board LED if current board is active output */
     state->onboard_led_state = (state->active_output == BOARD_ROLE);
-    gpio_put(GPIO_LED_PIN, state->onboard_led_state);
+    deskhop_led_put(state->onboard_led_state);
 
     /* Light up appropriate keyboard leds (if it's connected locally) */
     if (state->keyboard_connected) {
@@ -42,8 +80,8 @@ void restore_leds(device_t *state) {
 }
 
 uint8_t toggle_led(void) {
-    uint8_t new_led_state = gpio_get(GPIO_LED_PIN) ^ 1;
-    gpio_put(GPIO_LED_PIN, new_led_state);
+    uint8_t new_led_state = deskhop_led_get() ^ 1;
+    deskhop_led_put(new_led_state);
 
     return new_led_state;
 }
