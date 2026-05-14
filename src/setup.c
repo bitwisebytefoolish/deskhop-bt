@@ -22,6 +22,10 @@
 #include "pico/cyw43_arch.h"
 #endif
 
+#ifdef DH_BT_HID_HOST_KBD
+#include "bt_hid_host.h"
+#endif
+
 /* ================================================== *
  * Perform initial UART setup
  * ================================================== */
@@ -286,6 +290,16 @@ void initial_setup(device_t *state) {
            the watchdog reboots us, rather than running with a half-up device. */
         while (1) tight_loop_contents();
     }
+
+#ifdef DH_BT_HID_HOST_KBD
+    /* BTstack HID host init — must follow cyw43_arch_init() since it binds
+       the run-loop to the cyw43 async-context.  Must precede watchdog_enable()
+       since btstack_cyw43_init() may take up to a few ms.
+       bt_hid_state is declared static so it outlives this function. */
+    static bt_hid_state_t bt_hid_state;
+    bt_hid_state.keyboard_connected = &state->keyboard_connected;
+    bt_hid_host_init(&bt_hid_state);
+#endif
 #endif
 
     /* Load the current firmware info */

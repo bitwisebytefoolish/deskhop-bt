@@ -7,11 +7,11 @@
 
    Address layout (4 MB flash, 512 KB SRAM):
 
-     0x10000000 +---------------------+ FLASH (executable)              1 MB
+     0x10000000 +---------------------+ FLASH (executable)            1.5 MB
                 |                     |
-     0x10100000 +---------------------+ DISK_IMAGE (web-config FAT)    64 KB
-     0x10110000 +---------------------+ FW_METADATA (version + CRC)     4 KB
-     0x10111000 +---------------------+ FW_STAGING (OTA staging area)   1 MB
+     0x10180000 +---------------------+ DISK_IMAGE (web-config FAT)    64 KB
+     0x10190000 +---------------------+ FW_METADATA (version + CRC)     4 KB
+     0x10191000 +---------------------+ FW_STAGING (OTA staging area) 1.5 MB
                 |                     |
      0x103FD000 +---------------------+ FLASH_BTSTACK_BANK (BT bonds)   8 KB
      0x103FF000 +---------------------+ FLASH_CONFIG (persistent cfg)   4 KB
@@ -21,23 +21,22 @@
    (pico_btstack_flash_bank requires two FLASH_SECTOR_SIZE sectors).
    It is declared (NOLOAD) so it never appears in the .uf2 image; the
    pico_flash_bank library reads/writes this region at runtime via
-   PICO_FLASH_BANK_STORAGE_OFFSET (set in CMakeLists.txt to match the
+   PICO_FLASH_BANK_STORAGE_OFFSET (set in btstack_config.h to match the
    `__FLASH_TOTAL_SIZE - __CONFIG_STORAGE_LEN - __BTSTACK_BANK_LEN`
    offset below).
 
-   The 1 MB executable region is ~12x the current 83 KB pico build. Of
-   that, ~240 KB is taken by the cyw43-driver firmware blob (.rodata) and
-   ~30-50 KB by cyw43_arch + driver. That leaves ~700 KB of headroom for
-   BTstack (typical Classic + BLE host footprint ~50-100 KB) and the
-   hid_host work scheduled for #6 / #9. STAGING matches FLASH size so a
-   full firmware replacement fits.
+   The 1.5 MB executable region gives ample headroom: the cyw43-driver
+   firmware blob takes ~240 KB (.rodata), cyw43_arch + driver ~50 KB,
+   BTstack Classic HID host ~80-120 KB, leaving ~1 MB for the deskhop
+   application itself.  STAGING matches FLASH size so a full firmware
+   replacement fits in the OTA staging area.
 */
 
-__FLASH_LEN = 1024k;
+__FLASH_LEN = 1536k;
 __DISK_IMAGE_LEN = 64k;
 __METADATA_LEN = 4k;
 __TOTAL_IMAGE_LENGTH = __FLASH_LEN + __DISK_IMAGE_LEN + __METADATA_LEN;
-__STAGING_LEN = 1024k;
+__STAGING_LEN = 1536k;
 __CONFIG_STORAGE_LEN = 4k;
 __BTSTACK_BANK_LEN = 8k;
 __FLASH_TOTAL_SIZE = 4096k;

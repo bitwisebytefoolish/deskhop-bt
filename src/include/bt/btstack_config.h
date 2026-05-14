@@ -23,6 +23,9 @@
 
 /* ---- Buffer / object counts --------------------------------------- */
 
+/* Required by btstack_hci_transport_cyw43.c — must be a multiple of 4. */
+#define HCI_ACL_CHUNK_SIZE_ALIGNMENT  4
+
 #define HCI_ACL_PAYLOAD_SIZE         (1691 + 4)
 #define HCI_INCOMING_PRE_BUFFER_SIZE  4
 #define HCI_OUTGOING_PRE_BUFFER_SIZE  4

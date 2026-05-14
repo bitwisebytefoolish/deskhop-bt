@@ -149,15 +149,14 @@ if(PICO_CYW43_SUPPORTED)
     endif()
 
     if(DH_BT_HID_HOST_KBD)
-        ## pico_btstack_classic pulls in hid_host.c, l2cap, sdp, ssp.
-        ## pico_btstack_flash_bank provides the TLV bond store backed by
-        ## FLASH_BTSTACK_BANK (8 KB, defined in the linker scripts).
-        ## pico_btstack_run_loop_async_context binds BTstack timers to
-        ## cyw43_arch_async_context() — works with the poll variant.
+        ## pico_btstack_cyw43: one-stop Pico W glue — wires run-loop to the
+        ## cyw43_arch async-context, inits the HCI transport, and sets up TLV
+        ## flash storage. Pulls in pico_btstack_base, pico_btstack_flash_bank,
+        ## pico_btstack_run_loop_async_context, and pico_btstack_hci_transport_cyw43.
+        ## pico_btstack_classic adds hid_host.c, l2cap, sdp, and ssp on top.
         list(APPEND COMMON_LINK_LIBRARIES
+            pico_btstack_cyw43
             pico_btstack_classic
-            pico_btstack_flash_bank
-            pico_btstack_run_loop_async_context
         )
         ## btstack_config.h is in src/include/bt/ so BTstack finds it.
         list(APPEND COMMON_INCLUDES ${CMAKE_SOURCE_DIR}/src/include/bt)
@@ -177,6 +176,9 @@ set_property(SOURCE ${DISK_ASM} APPEND PROPERTY COMPILE_OPTIONS "-x" "assembler-
 add_executable(${binary} ${DISK_ASM})
 
 target_sources(${binary} PUBLIC ${COMMON_SOURCES})
+if(DH_BT_HID_HOST_KBD)
+    target_sources(${binary} PRIVATE ${SRC_DIR}/bt_hid_host.c)
+endif()
 target_compile_definitions(${binary}
     PRIVATE
     VERSION_MAJOR=${VERSION_MAJOR}
