@@ -137,10 +137,31 @@ set(COMMON_LINK_LIBRARIES
 ## src/tasks.c. (See https://github.com/phieri/viking-bio-matter/pull/75
 ## for the same finding from another project.)
 ##
-## BTstack itself is not linked here — that comes with the hid_host work
-## (#6 keyboard, #9 mouse).
+## BTstack HID host (issue #6): enabled by default on CYW43 builds.
+## Override with -DDH_BT_HID_HOST_KBD=0 to disable (e.g. for a minimal
+## cyw43-LED-only build). Issue #9 (mouse) will add DH_BT_HID_HOST_MOUSE
+## as an orthogonal flag following the same pattern.
 if(PICO_CYW43_SUPPORTED)
     list(APPEND COMMON_LINK_LIBRARIES pico_cyw43_arch_poll)
+
+    if(NOT DEFINED DH_BT_HID_HOST_KBD)
+        set(DH_BT_HID_HOST_KBD 1)
+    endif()
+
+    if(DH_BT_HID_HOST_KBD)
+        ## pico_btstack_classic pulls in hid_host.c, l2cap, sdp, ssp.
+        ## pico_btstack_flash_bank provides the TLV bond store backed by
+        ## FLASH_BTSTACK_BANK (8 KB, defined in the linker scripts).
+        ## pico_btstack_run_loop_async_context binds BTstack timers to
+        ## cyw43_arch_async_context() — works with the poll variant.
+        list(APPEND COMMON_LINK_LIBRARIES
+            pico_btstack_classic
+            pico_btstack_flash_bank
+            pico_btstack_run_loop_async_context
+        )
+        ## btstack_config.h is in src/include/bt/ so BTstack finds it.
+        list(APPEND COMMON_INCLUDES ${CMAKE_SOURCE_DIR}/src/include/bt)
+    endif()
 endif()
 set(binary deskhop)
 
@@ -166,6 +187,8 @@ target_compile_definitions(${binary}
     # Setting CYW43_LWIP=0 keeps cyw43.h from pulling in lwip/netif.h,
     # which we don't ship lwipopts.h for. Revisit if we ever need Wi-Fi.
     $<$<BOOL:${PICO_CYW43_SUPPORTED}>:CYW43_LWIP=0>
+    # BT HID host keyboard flag — propagated to source so #ifdef guards work.
+    $<$<BOOL:${DH_BT_HID_HOST_KBD}>:DH_BT_HID_HOST_KBD>
     __disk_file_path__="${DISK_BIN}"
 )
 
