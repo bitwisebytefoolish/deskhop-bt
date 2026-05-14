@@ -56,6 +56,17 @@ void pio_usb_host_config(device_t *state) {
     static pio_usb_configuration_t config = PIO_USB_DEFAULT_CONFIG;
     config.pin_dp                         = PIO_USB_DP_PIN_DEFAULT;
 
+#ifdef CYW43_WL_GPIO_LED_PIN
+    /* On boards with the CYW43439 wireless module (Pico W, Pico 2 W), the
+       cyw43-driver claims a state machine from pio0 during cyw43_arch_init()
+       — which has already run by the time we get here. Pico-PIO-USB's default
+       config hardcodes pio0 sm0/sm1/sm2, which collides with that.
+       RP2350 has three PIO blocks (pio0, pio1, pio2); pio2 is always free
+       for us, so put Pico-PIO-USB there. */
+    config.pio_tx_num = 2;
+    config.pio_rx_num = 2;
+#endif
+
     /* Board B is always report mode, board A is default-boot if configured */
     if (state->board_role == OUTPUT_B || ENFORCE_KEYBOARD_BOOT_PROTOCOL == 0)
         tuh_hid_set_default_protocol(HID_PROTOCOL_REPORT);
