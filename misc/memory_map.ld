@@ -33,6 +33,7 @@ __METADATA_LEN = 4k;
 __TOTAL_IMAGE_LENGTH = 256k;
 
 __CONFIG_STORAGE_LEN = 4k;
+__BTSTACK_BANK_LEN = 8k;
 
 MEMORY
 {
@@ -41,6 +42,10 @@ MEMORY
     FW_METADATA(rw) : ORIGIN = 0x10000000 + (__TOTAL_IMAGE_LENGTH - __METADATA_LEN), LENGTH = __METADATA_LEN
     FW_STAGING(rw) : ORIGIN = 0x10000000 + __TOTAL_IMAGE_LENGTH, LENGTH = __TOTAL_IMAGE_LENGTH
 
+    /* Reserved for BTstack TLV bond storage on Pico-W variants; (NOLOAD) so it
+       costs zero bytes in the RP2040 .uf2. Mirrors memory_map_rp2350.ld so a
+       future BT-on-RP2040 build doesn't need a flash-layout migration. */
+    FLASH_BTSTACK_BANK(rw) : ORIGIN = 0x10000000 + (2048k - __CONFIG_STORAGE_LEN - __BTSTACK_BANK_LEN), LENGTH = __BTSTACK_BANK_LEN
     FLASH_CONFIG(rw) : ORIGIN = 0x10000000 + (2048k - __CONFIG_STORAGE_LEN), LENGTH = __CONFIG_STORAGE_LEN
     RAM(rwx) : ORIGIN =  0x20000000, LENGTH = 256k
     SCRATCH_X(rwx) : ORIGIN = 0x20040000, LENGTH = 4k
@@ -266,6 +271,10 @@ SECTIONS
     .section_config (NOLOAD) : {
         ADDR_CONFIG = .;
     } > FLASH_CONFIG
+
+    .section_btstack_bank (NOLOAD) : {
+        ADDR_BTSTACK_BANK = .;
+    } > FLASH_BTSTACK_BANK
 
     /* .stack*_dummy section doesn't contains any symbols. It is only
      * used for linker to calculate size of stack sections, and assign

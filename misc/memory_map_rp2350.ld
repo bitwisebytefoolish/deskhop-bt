@@ -13,8 +13,17 @@
      0x10110000 +---------------------+ FW_METADATA (version + CRC)     4 KB
      0x10111000 +---------------------+ FW_STAGING (OTA staging area)   1 MB
                 |                     |
+     0x103FD000 +---------------------+ FLASH_BTSTACK_BANK (BT bonds)   8 KB
      0x103FF000 +---------------------+ FLASH_CONFIG (persistent cfg)   4 KB
      0x10400000 +---------------------+ end of flash
+
+   FLASH_BTSTACK_BANK reserves space for BTstack's TLV bond storage
+   (pico_btstack_flash_bank requires two FLASH_SECTOR_SIZE sectors).
+   It is declared (NOLOAD) so it never appears in the .uf2 image; the
+   pico_flash_bank library reads/writes this region at runtime via
+   PICO_FLASH_BANK_STORAGE_OFFSET (set in CMakeLists.txt to match the
+   `__FLASH_TOTAL_SIZE - __CONFIG_STORAGE_LEN - __BTSTACK_BANK_LEN`
+   offset below).
 
    The 1 MB executable region is ~12x the current 83 KB pico build. Of
    that, ~240 KB is taken by the cyw43-driver firmware blob (.rodata) and
@@ -30,6 +39,7 @@ __METADATA_LEN = 4k;
 __TOTAL_IMAGE_LENGTH = __FLASH_LEN + __DISK_IMAGE_LEN + __METADATA_LEN;
 __STAGING_LEN = 1024k;
 __CONFIG_STORAGE_LEN = 4k;
+__BTSTACK_BANK_LEN = 8k;
 __FLASH_TOTAL_SIZE = 4096k;
 
 MEMORY
@@ -39,6 +49,7 @@ MEMORY
     FW_METADATA(rw)   : ORIGIN = 0x10000000 + __FLASH_LEN + __DISK_IMAGE_LEN, LENGTH = __METADATA_LEN
     FW_STAGING(rw)    : ORIGIN = 0x10000000 + __TOTAL_IMAGE_LENGTH, LENGTH = __STAGING_LEN
 
+    FLASH_BTSTACK_BANK(rw) : ORIGIN = 0x10000000 + (__FLASH_TOTAL_SIZE - __CONFIG_STORAGE_LEN - __BTSTACK_BANK_LEN), LENGTH = __BTSTACK_BANK_LEN
     FLASH_CONFIG(rw)  : ORIGIN = 0x10000000 + (__FLASH_TOTAL_SIZE - __CONFIG_STORAGE_LEN), LENGTH = __CONFIG_STORAGE_LEN
     RAM(rwx)          : ORIGIN = 0x20000000, LENGTH = 512k
     SCRATCH_X(rwx)    : ORIGIN = 0x20080000, LENGTH = 4k
@@ -273,6 +284,10 @@ SECTIONS
     .section_config (NOLOAD) : {
         ADDR_CONFIG = .;
     } > FLASH_CONFIG
+
+    .section_btstack_bank (NOLOAD) : {
+        ADDR_BTSTACK_BANK = .;
+    } > FLASH_BTSTACK_BANK
 
     /* by default we put core 0 stack at the end of scratch Y, so that if core 1
        stack is not used then all of SCRATCH_X is free. */
