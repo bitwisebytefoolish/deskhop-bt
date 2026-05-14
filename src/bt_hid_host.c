@@ -8,16 +8,18 @@
  * TinyUSB and BTstack are intentionally NOT co-included in this translation
  * unit: both define HID_REPORT_TYPE_INPUT/OUTPUT/FEATURE as enum constants
  * and the names collide.  All deskhop state is accessed through bt_hid_state_t
- * (pointer fields only) to keep this file free of TinyUSB headers. */
+ * (pointer fields only) to keep this file free of TinyUSB headers.
+ *
+ * btstack_cyw43_init() is NOT called here.  cyw43_arch_init() (poll variant,
+ * cyw43_arch_poll.c) already calls it internally when CYW43_ENABLE_BLUETOOTH
+ * is set — which it is whenever pico_btstack_cyw43 is linked.  A second call
+ * triggers a BTstack run-loop double-init assertion and crashes the board. */
 #include "bluetooth.h"
 #include "hci.h"
 #include "l2cap.h"
 #include "gap.h"
 #include "btstack_event.h"
 #include "classic/hid_host.h"
-
-#include "pico/btstack_cyw43.h"
-#include "pico/cyw43_arch.h"
 
 #include "bt_hid_host.h"
 
@@ -86,12 +88,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
 void bt_hid_host_init(bt_hid_state_t *bt_state) {
     g_bt = bt_state;
 
-    /* Wire the BTstack run-loop to the cyw43_arch poll async-context,
-     * initialise the CYW43 HCI transport, and set up TLV flash bond
-     * storage in FLASH_BTSTACK_BANK (offset set in btstack_config.h). */
-    btstack_cyw43_init(cyw43_arch_async_context());
-
-    /* Classic BT stack layers */
+    /* btstack_cyw43_init() was already called inside cyw43_arch_init()
+     * (via cyw43_arch_poll.c when CYW43_ENABLE_BLUETOOTH is set).
+     * Start directly at the Classic BT stack layers. */
     l2cap_init();
 
     /* Just-works SSP pairing — no PIN, no confirmation UI needed.
