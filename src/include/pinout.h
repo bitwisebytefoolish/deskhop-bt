@@ -47,5 +47,16 @@
 #define BOARD_B_RX 17
 #define BOARD_B_TX 16
 
+/* Board-role discriminator pin. The autoprobe enables an internal
+   pull-up and reads. Carrier mod: bridge GP18 (pin 24) to the adjacent
+   GND (pin 23) on socket A only. Socket A reads low (external GND
+   wins); socket B reads high (floats, pull-up wins). Replaces the old
+   GP13 pull-toggle autoprobe which was fooled on RP2350 because the
+   digital isolator's idle-high output overwhelms the ~50 kΩ internal
+   pulls on both sockets (verified 2026-05-14 via the autoprobe DETAIL
+   crumb: GP13 and GP17 both read 0xff regardless of pull on both
+   boards). GP18 is otherwise unused in deskhop. */
+#define BOARD_ROLE_DETECT_PIN 18
+
 #define SERIAL_RX_PIN (global_state.board_role == OUTPUT_A ? BOARD_A_RX : BOARD_B_RX)
 #define SERIAL_TX_PIN (global_state.board_role == OUTPUT_A ? BOARD_A_TX : BOARD_B_TX)

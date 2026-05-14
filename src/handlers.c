@@ -342,7 +342,7 @@ void handle_response_byte_msg(uart_packet_t *packet, device_t *state) {
     else {
         /* Provide visual feedback of the ongoing copy by toggling LED for every sector */
         if((address & 0xfff) == 0x000)
-            toggle_led();
+            toggle_led(state);
     }
 
     /* Update checksum as we receive each byte */

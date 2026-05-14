@@ -140,6 +140,7 @@ typedef struct {
     bool mouse_zoom;         // True when "mouse zoom" is enabled
     bool switch_lock;        // True when device is prevented from switching
     bool onboard_led_state;  // True when LED is ON
+    volatile bool onboard_led_dirty; // True when onboard_led_state has been changed by a non-cyw43-owning core and needs core0 to apply it via cyw43_arch_gpio_put. See led_apply_task.
     bool relative_mouse;     // True when relative mouse mode is used
     bool gaming_mode;        // True when gaming mode is on (relative passthru + lock)
     bool config_mode_active; // True when config mode is active
