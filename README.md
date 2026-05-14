@@ -87,7 +87,7 @@ cmake -S . -B build-pico2w -DPICO_BOARD=pico2_w
 cmake --build build-pico2w
 ```
 
-Note: the Pi Pico 2 W build currently lacks the custom flash layout used by the web-config disk and OTA firmware-exchange features — these are tracked in [issue #14](https://github.com/bitwisebytefoolish/deskhop-bt/issues/14) and depend on porting `misc/memory_map.ld` to the RP2350 memory map.
+The Pi Pico 2 W build uses a parallel custom flash layout (`misc/memory_map_rp2350.ld`) that mirrors the original — disk image, firmware metadata, OTA staging, and persistent config storage are all present, sized up to take advantage of the RP2350's 4 MB flash. `PICO_COPY_TO_RAM` is also automatically disabled for RP2350 builds, since the XIP cache is fast enough that copy-to-RAM hurts more than it helps (and would otherwise drag the ~240 KB CYW43 firmware blob into SRAM).
 
 additionally, to rebuild web UI check webconfig/ and execute ```./render.py```, you'll need jinja2 installed.
 
