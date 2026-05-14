@@ -10,9 +10,22 @@
  */
 #pragma once
 
+#include <pico.h>           /* pulls in the board header so CYW43_WL_GPIO_LED_PIN is visible to the #ifdef below */
 #include <hardware/watchdog.h>
 
-#define WATCHDOG_TIMEOUT        500                     // In milliseconds => needs to be reset at least every 200ms
+/* RP2040 build: 500 ms is plenty — the original deskhop budget.
+   Pi Pico 2 W / RP2350 + CYW43439 build: bump to 2000 ms because the
+   cyw43-driver's own ioctl path can stall the caller for ~500 ms
+   (CYW43_IOCTL_TIMEOUT_US internally). With a 500 ms watchdog those
+   timers race and the watchdog wins, which we observed empirically as
+   "Pico 2 W reboots in a loop, no enumeration" during the autoprobe
+   debug session. 2000 ms gives the cyw43 stack room to time out and
+   recover naturally. */
+#ifdef CYW43_WL_GPIO_LED_PIN
+#define WATCHDOG_TIMEOUT        2000
+#else
+#define WATCHDOG_TIMEOUT        500
+#endif
 #define WATCHDOG_PAUSE_ON_DEBUG 1                       // When using a debugger, disable watchdog
 #define CORE1_HANG_TIMEOUT_US   WATCHDOG_TIMEOUT * 1000 // Convert to microseconds
 

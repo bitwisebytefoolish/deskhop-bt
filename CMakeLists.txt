@@ -14,6 +14,16 @@ set(DP_PIN_DEFAULT 14 CACHE STRING "Default USB D+ Pin Number")
 set(PIO_USE_TINYUSB 1 CACHE STRING "Make TinyUSB Manage the PIO USB Port")
 set(PICO_BOARD "pico" CACHE STRING "Target board: 'pico' (RP2040) or 'pico2_w' (RP2350 + CYW43439). See issue #2.")
 
+## Optional build-time override of board_autoprobe. Set to 0 (A) or 1 (B)
+## to skip the GP18 probe and hard-code the role. Useful when a carrier
+## hasn't been modified with the GP18→GND bridge on socket A (see
+## src/include/pinout.h::BOARD_ROLE_DETECT_PIN), or for forcing a known
+## role during bring-up. Unset / empty = run the autoprobe normally.
+set(FORCE_BOARD_ROLE "" CACHE STRING "Force board_role at build time: 0=A, 1=B, empty=autoprobe")
+if (NOT "${FORCE_BOARD_ROLE}" STREQUAL "")
+    add_definitions(-DFORCE_BOARD_ROLE=${FORCE_BOARD_ROLE})
+endif()
+
 ## Pico SDK Configuration
 set(PICO_SDK_FETCH_FROM_GIT off)
 set(PICO_SDK_PATH ${CMAKE_CURRENT_LIST_DIR}/pico-sdk)
@@ -117,15 +127,20 @@ set(COMMON_LINK_LIBRARIES
 ## reachable via cyw43_arch_gpio_*. The Bluetooth radio also sits on the
 ## same module and is driven through BTstack via cyw43_arch.
 ##
-## We link the `threadsafe_background` variant — it runs CYW43 callbacks on
-## an internal background context (IRQ + alarm pool), so deskhop's existing
-## core1 task scheduler doesn't need to poll cyw43_arch_poll() itself. The
-## non-lwip variant is chosen because we don't need Wi-Fi networking.
+## We link the `poll` variant rather than `threadsafe_background`. The
+## threadsafe-background async context allocates a hardware alarm and a
+## user IRQ at init time; in firmware that already uses hardware alarms
+## and IRQs heavily (deskhop has DMA-driven UART, watchdog, custom task
+## scheduler) that allocation hangs indefinitely inside cyw43_arch_init.
+## Switching to poll sidesteps the issue. The trade-off is that we have
+## to call cyw43_arch_poll() in our task loop ourselves — see
+## src/tasks.c. (See https://github.com/phieri/viking-bio-matter/pull/75
+## for the same finding from another project.)
 ##
 ## BTstack itself is not linked here — that comes with the hid_host work
 ## (#6 keyboard, #9 mouse).
 if(PICO_CYW43_SUPPORTED)
-    list(APPEND COMMON_LINK_LIBRARIES pico_cyw43_arch_threadsafe_background)
+    list(APPEND COMMON_LINK_LIBRARIES pico_cyw43_arch_poll)
 endif()
 set(binary deskhop)
 

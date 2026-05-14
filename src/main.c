@@ -30,6 +30,10 @@ int main(void) {
         [3] = {.exec = &process_mouse_queue_task, .frequency = _HZ(2000)},   // | Check if there were any mouse movements and send them
         [4] = {.exec = &process_hid_queue_task,   .frequency = _HZ(1000)},   // | Check if there are any packets to send over vendor link
         [5] = {.exec = &process_uart_tx_task,     .frequency = _TOP()},      // | Check if there are any packets to send over UART
+        [6] = {.exec = &led_apply_task,           .frequency = _HZ(100)},    // | Apply pending onboard-LED changes (drains state->onboard_led_dirty; cyw43_arch_gpio_put on Pico 2 W, gpio_put on Pico)
+#ifdef CYW43_WL_GPIO_LED_PIN
+        [7] = {.exec = &cyw43_poll_task,          .frequency = _TOP()},      // | Pump cyw43 / BTstack event loop (poll variant) — Pico W / 2 W only
+#endif
     };                                                                       // `----- then go back and repeat forever
     const int NUM_TASKS = ARRAY_SIZE(tasks_core0);
 
@@ -43,8 +47,9 @@ int main(void) {
     set_active_output(device, OUTPUT_A);
 
     while (true) {
-        for (int i = 0; i < NUM_TASKS; i++)
+        for (int i = 0; i < NUM_TASKS; i++) {
             task_scheduler(device, &tasks_core0[i]);
+        }
     }
 }
 
@@ -63,8 +68,9 @@ void core1_main() {
         // Update the timestamp, so core0 can figure out if we're dead
         device->core1_last_loop_pass = time_us_64();
 
-        for (int i = 0; i < NUM_TASKS; i++)
+        for (int i = 0; i < NUM_TASKS; i++) {
             task_scheduler(device, &tasks_core1[i]);
+        }
     }
 }
 /* =======  End of Main Program Loops  ======= */
