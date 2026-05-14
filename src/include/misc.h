@@ -35,4 +35,5 @@ extern device_t global_state;
 void    deskhop_led_init(void);
 void    blink_led(device_t *);
 void    restore_leds(device_t *);
-uint8_t toggle_led(void);
+uint8_t toggle_led(device_t *);
+void    led_apply_task(device_t *);

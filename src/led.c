@@ -34,8 +34,23 @@
 
 #ifdef CYW43_WL_GPIO_LED_PIN
 #include "pico/cyw43_arch.h"
-static inline void deskhop_led_put(bool v) { cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, v); }
-static inline bool deskhop_led_get(void)   { return cyw43_arch_gpio_get(CYW43_WL_GPIO_LED_PIN); }
+/* IMPORTANT: deskhop_led_put / deskhop_led_get must ONLY be called from
+   core0. The cyw43 poll-arch variant is NOT multi-core safe — earlier
+   attempts to serialize with a recursive_mutex still hung the driver
+   when a single cyw43 call internally waited for state owned by the
+   other core (boot crumbs showed core0 stuck in cyw43_poll_task while
+   core1 was stuck in led_blinking_task / usb_host_task). The fix is
+   architectural: only core0 ever issues cyw43_arch_* calls. core1
+   paths that want to change the onboard LED set state->onboard_led_state
+   and state->onboard_led_dirty=true; led_apply_task (in src/tasks.c,
+   wired into core0 task list in main.c) picks up the dirty flag and
+   issues the cyw43 call. */
+static inline void deskhop_led_put(bool v) {
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, v);
+}
+static inline bool deskhop_led_get(void)   {
+    return cyw43_arch_gpio_get(CYW43_WL_GPIO_LED_PIN);
+}
 #else
 static inline void deskhop_led_put(bool v) { gpio_put(GPIO_LED_PIN, v); }
 static inline bool deskhop_led_get(void)   { return gpio_get(GPIO_LED_PIN); }
@@ -68,26 +83,39 @@ void set_keyboard_leds(uint8_t requested_led_state, device_t *state) {
 }
 
 void restore_leds(device_t *state) {
-    /* Light up on-board LED if current board is active output */
-    state->onboard_led_state = (state->active_output == BOARD_ROLE);
-    deskhop_led_put(state->onboard_led_state);
+    /* Light up on-board LED if current board is active output. Only flag
+       the change as dirty; the actual cyw43 write happens on core0 in
+       led_apply_task. The RP2040 (non-CYW43) path picks up the dirty
+       flag the same way for code-path symmetry. */
+    bool target = (state->active_output == BOARD_ROLE);
+    if (state->onboard_led_state != target) {
+        state->onboard_led_state = target;
+        state->onboard_led_dirty = true;
+    }
 
-    /* Light up appropriate keyboard leds (if it's connected locally) */
+    /* Light up appropriate keyboard leds (if it's connected locally).
+       tuh_hid_set_report is a USB host op; safe to invoke from any core
+       — it queues the control transfer for the USB host stack to drain. */
     if (state->keyboard_connected) {
         uint8_t leds = state->keyboard_leds[state->active_output];
         set_keyboard_leds(leds, state);
     }
 }
 
-uint8_t toggle_led(void) {
-    uint8_t new_led_state = deskhop_led_get() ^ 1;
-    deskhop_led_put(new_led_state);
-
+/* Logical LED toggle. Updates the requested state + dirty flag; the actual
+   cyw43 write is owned by core0 (led_apply_task). Called from
+   led_blinking_task on core1 — no longer touches cyw43 directly. */
+uint8_t toggle_led(device_t *state) {
+    uint8_t new_led_state = state->onboard_led_state ? 0 : 1;
+    state->onboard_led_state = (bool)new_led_state;
+    state->onboard_led_dirty = true;
     return new_led_state;
 }
 
 void blink_led(device_t *state) {
-    /* Since LEDs might be ON previously, we go OFF, ON, OFF, ON, OFF */
+    /* Since LEDs might be ON previously, we go OFF, ON, OFF, ON, OFF.
+       Safe on CYW43 boards now that toggle_led no longer touches cyw43
+       directly — led_apply_task on core0 issues the actual writes. */
     state->blinks_left     = 5;
     state->last_led_change = time_us_32();
 }
@@ -104,8 +132,9 @@ void led_blinking_task(device_t *state) {
     if ((time_us_32()) - state->last_led_change < blink_interval_us)
         return;
 
-    /* Toggle the LED state */
-    uint8_t new_led_state = toggle_led();
+    /* Toggle the logical LED state. cyw43 write is deferred to core0
+       (led_apply_task) — this task can run on core1 safely. */
+    uint8_t new_led_state = toggle_led(state);
 
     /* Also keyboard leds (if it's connected locally) since on-board leds are not visible */
     leds = new_led_state * 0x07; /* Numlock, capslock, scrollock */
@@ -120,4 +149,16 @@ void led_blinking_task(device_t *state) {
     /* Restore LEDs in the last pass */
     if (state->blinks_left == 0)
         restore_leds(state);
+}
+
+/* Core0 task: apply pending LED state changes via cyw43. All cyw43_arch_*
+   calls are confined to core0 — see comment above deskhop_led_put. Runs
+   in the core0 task list (main.c). Fires at _HZ(100) — fast enough that
+   LED transitions track visually but slow enough to not starve the
+   USB device task. */
+void led_apply_task(device_t *state) {
+    if (!state->onboard_led_dirty)
+        return;
+    deskhop_led_put(state->onboard_led_state ? 1 : 0);
+    state->onboard_led_dirty = false;
 }

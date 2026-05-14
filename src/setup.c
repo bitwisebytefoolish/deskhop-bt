@@ -56,6 +56,17 @@ void pio_usb_host_config(device_t *state) {
     static pio_usb_configuration_t config = PIO_USB_DEFAULT_CONFIG;
     config.pin_dp                         = PIO_USB_DP_PIN_DEFAULT;
 
+#ifdef CYW43_WL_GPIO_LED_PIN
+    /* On boards with the CYW43439 wireless module (Pico W, Pico 2 W), the
+       cyw43-driver claims a state machine from pio0 during cyw43_arch_init()
+       — which has already run by the time we get here. Pico-PIO-USB's default
+       config hardcodes pio0 sm0/sm1/sm2, which collides with that.
+       RP2350 has three PIO blocks (pio0, pio1, pio2); pio2 is always free
+       for us, so put Pico-PIO-USB there. */
+    config.pio_tx_num = 2;
+    config.pio_rx_num = 2;
+#endif
+
     /* Board B is always report mode, board A is default-boot if configured */
     if (state->board_role == OUTPUT_B || ENFORCE_KEYBOARD_BOOT_PROTOCOL == 0)
         tuh_hid_set_default_protocol(HID_PROTOCOL_REPORT);
@@ -81,34 +92,32 @@ void pio_usb_host_config(device_t *state) {
     - If the entire sequence of values match, we are definitely floating
       so IC is not connected on BOARD_A_RX, and we're BOARD B
 */
+/* Detect socket role by reading BOARD_ROLE_DETECT_PIN with an internal
+   pull-up enabled. Carrier mod required: bridge that pin to its adjacent
+   GND pin on socket A only; socket B leaves the pin floating. The
+   internal ~50 kΩ pull-up easily wins against a floating pin (reads
+   high → socket B) but cannot fight a hard external GND (reads low →
+   socket A). Replaces the original GP13 pull-toggle probe which on
+   RP2350 carriers is overpowered by the digital isolator's idle-high
+   bias on both sockets. */
 int board_autoprobe(void) {
-    const bool probing_sequence[] = {true, false, false, true, true, false, true, false};
-    const int seq_len = ARRAY_SIZE(probing_sequence);
+    gpio_init(BOARD_ROLE_DETECT_PIN);
+    gpio_set_dir(BOARD_ROLE_DETECT_PIN, GPIO_IN);
+    gpio_pull_up(BOARD_ROLE_DETECT_PIN);
+    sleep_us(200);  /* settling for the 50 kΩ pull against any board parasitics */
+    bool reads_high = gpio_get(BOARD_ROLE_DETECT_PIN);
+    gpio_disable_pulls(BOARD_ROLE_DETECT_PIN);
 
-    /* Set the pin as INPUT and initialize it */
-    gpio_init(BOARD_A_RX);
-    gpio_set_dir(BOARD_A_RX, GPIO_IN);
-
-    for (int i=0; i<seq_len; i++) {
-        if (probing_sequence[i])
-            gpio_pull_up(BOARD_A_RX);
-        else
-            gpio_pull_down(BOARD_A_RX);
-
-        /* Wait for value to settle */
-        sleep_ms(3);
-
-        /* Read the value */
-        bool value = gpio_get(BOARD_A_RX);
-        gpio_disable_pulls(BOARD_A_RX);
-
-        /* If values mismatch at any point, means IC is connected and we're board A */
-        if (probing_sequence[i] != value)
-            return OUTPUT_A;
-    }
-
-    /* If it was just reading the pull up/down in all cases, pin is floating and we're board B */
-    return OUTPUT_B;
+#ifdef FORCE_BOARD_ROLE
+    /* Build-time override (0 = A, 1 = B). Useful when the carrier doesn't
+       have the GP18→GND bridge yet, or for forcing a known role during
+       bring-up. The probe above still runs so the pin is properly
+       quiesced regardless. */
+    (void)reads_high;
+    return FORCE_BOARD_ROLE;
+#else
+    return reads_high ? OUTPUT_B : OUTPUT_A;
+#endif
 }
 
 
@@ -221,20 +230,10 @@ void initial_setup(device_t *state) {
     /* Search the persistent storage sector in flash for valid config or use defaults */
     load_config(state);
 
-#ifdef CYW43_WL_GPIO_LED_PIN
-    /* Initialise the CYW43439 wireless module. Must run before deskhop_led_init()
-       because on these boards the on-board LED is a virtual GPIO inside the
-       wireless module — cyw43_arch_gpio_put fails without this. BTstack will
-       also use this radio once #6 / #9 are wired up. */
-    if (cyw43_arch_init() != 0) {
-        /* If radio init fails there's nothing useful we can do — sit on it so
-           the watchdog reboots us, rather than running with a half-up device. */
-        while (1) tight_loop_contents();
-    }
-#endif
-
     /* Initialise the on-board LED (platform-specific — direct GPIO on the
-       original Pico, CYW43 virtual GPIO on Pi Pico W / 2 W). */
+       original Pico, CYW43 virtual GPIO on Pi Pico W / 2 W). On the CYW43
+       boards this is a no-op; the virtual GPIO is brought up by
+       cyw43_arch_init(), called later in this function. */
     deskhop_led_init();
 
     /* Check if we should boot in configuration mode or not */
@@ -260,7 +259,8 @@ void initial_setup(device_t *state) {
     multicore_reset_core1();
     multicore_launch_core1(core1_main);
 
-    /* Initialize and configure TinyUSB Device */
+    /* Initialize and configure TinyUSB Device. Must run before cyw43_arch_init()
+       on Pico 2 W — see comment below for the enumeration-window rationale. */
     tud_init(BOARD_TUD_RHPORT);
 
     /* Initialize and configure TinyUSB Host */
@@ -270,13 +270,30 @@ void initial_setup(device_t *state) {
     configure_tx_dma(state);
     configure_rx_dma(state);
 
+#ifdef CYW43_WL_GPIO_LED_PIN
+    /* Initialise the CYW43439 wireless module — deferred to here on purpose.
+       cyw43_arch_init() blocks the CPU for hundreds of ms loading the radio
+       firmware blob over SPI. If it runs before tud_init(), the host PC's
+       USB enumeration window expires while we're stuck in firmware load and
+       the device never appears. Running it after tud_init+tuh_init means
+       enumeration starts on time and the radio comes up after.
+       The `poll` cyw43_arch variant is used (see CMakeLists); it requires
+       periodic cyw43_arch_poll() calls — handled by cyw43_poll_task in
+       src/tasks.c. */
+    int cyw_rc = cyw43_arch_init();
+    if (cyw_rc != 0) {
+        /* If radio init fails there's nothing useful we can do — sit on it so
+           the watchdog reboots us, rather than running with a half-up device. */
+        while (1) tight_loop_contents();
+    }
+#endif
+
     /* Load the current firmware info */
     state->_running_fw = _firmware_metadata;
 
     /* Update the core1 initial pass timestamp before enabling the watchdog */
     state->core1_last_loop_pass = time_us_64();
 
-    /* Setup the watchdog so we reboot and recover from a crash */
     watchdog_enable(WATCHDOG_TIMEOUT, WATCHDOG_PAUSE_ON_DEBUG);
 }
 
