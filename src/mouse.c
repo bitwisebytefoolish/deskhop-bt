@@ -127,6 +127,8 @@ void output_mouse_report(mouse_report_t *report, device_t *state) {
         queue_mouse_report(report, state);
         state->last_activity[BOARD_ROLE] = time_us_64();
     } else {
+        /* DIAGNOSTIC: slot 13 high = times mouse took the relay (UART) branch. */
+        boot_crumb_inc_high16(BOOT_CRUMB_SLOT_RELAY_BRANCH);
         queue_packet((uint8_t *)report, MOUSE_REPORT_MSG, MOUSE_REPORT_LENGTH);
     }
 }
@@ -373,8 +375,12 @@ void process_mouse_queue_task(device_t *state) {
 
 void queue_mouse_report(mouse_report_t *report, device_t *state) {
     /* It wouldn't be fun to queue up a bunch of messages and then dump them all on host */
-    if (!state->tud_connected)
+    if (!state->tud_connected) {
+        /* DIAGNOSTIC: slot 11 high = mouse report silently dropped because
+           tud_connected is false. Paired counter to kbd drops. */
+        boot_crumb_inc_high16(BOOT_CRUMB_SLOT_QUEUE_DROPS);
         return;
+    }
 
     queue_try_add(&state->mouse_queue, report);
 }

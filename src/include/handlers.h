@@ -61,6 +61,10 @@ void handle_switch_lock_msg(uart_packet_t *, device_t *);
 void handle_sync_borders_msg(uart_packet_t *, device_t *);
 void handle_wipe_config_msg(uart_packet_t *, device_t *);
 void handle_write_fw_msg(uart_packet_t *, device_t *);
+void handle_dump_crumb_msg(uart_packet_t *, device_t *);
+
+/* Diagnostic hotkey: dump runtime crumbs to flash + BOOTSEL on BOTH boards. */
+void dump_crumb_hotkey_handler(device_t *, hid_keyboard_report_t *);
 
 /*==============================================================================
  *  Output Control

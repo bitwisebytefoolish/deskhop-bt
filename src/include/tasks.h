@@ -36,13 +36,10 @@ void usb_device_task(device_t *);
 void usb_host_task(device_t *);
 
 #ifdef CYW43_WL_GPIO_LED_PIN
-#include "pico/mutex.h"
 void cyw43_poll_task(device_t *);
-/* Serializes calls into the cyw43_arch poll-variant driver. The poll
-   variant is documented as NOT multi-core safe — calling cyw43_arch_poll
-   from core0 while core1 is inside cyw43_arch_gpio_put (via
-   led_blinking_task → restore_leds) deadlocks the driver. All cyw43_arch_*
-   call sites in deskhop must enter this mutex first. Definition (with
-   auto-init via .mutex_array section) is in src/tasks.c. */
-extern recursive_mutex_t cyw43_call_mutex;
+/* The cyw43_arch poll variant is single-thread. All cyw43_arch_* calls
+   are confined to core0: cyw43_poll_task here, and led_apply_task
+   (declared in misc.h) which is the only path that issues
+   cyw43_arch_gpio_put for the onboard LED. core1 paths that want to
+   change the LED set state->onboard_led_state + onboard_led_dirty=true. */
 #endif

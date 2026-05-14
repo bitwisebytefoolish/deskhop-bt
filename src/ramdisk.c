@@ -98,7 +98,7 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset, uint8_t *
     }
 
     /* Provide some visual indication that fw is being uploaded */
-    toggle_led();
+    toggle_led(&global_state);
     watchdog_update();
 
     return (int32_t)bufsize;

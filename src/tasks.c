@@ -63,30 +63,16 @@ void usb_host_task(device_t *state) {
    background variant would run this on a hardware-IRQ context, but
    that allocation hangs on deskhop's existing IRQ/alarm-heavy setup.
 
-   IMPORTANT: the poll variant is single-thread. Calls into the driver
-   from core1 (e.g. led_blinking_task → restore_leds → cyw43_arch_gpio_put)
-   race with this poll on core0 and deadlock the driver — observed via
-   boot crumbs as core0 stuck in cyw43_poll_task while core1 stuck in
-   led_blinking_task. The recursive mutex serializes all access. */
+   IMPORTANT: the poll variant is single-thread. ALL cyw43_arch_* calls
+   are confined to core0 — including this poll and the LED writes via
+   led_apply_task. Anything on core1 that wants to change the LED sets
+   state->onboard_led_state + state->onboard_led_dirty=true; led_apply_
+   task picks up the dirty flag on the next core0 iteration. */
 
 #ifdef CYW43_WL_GPIO_LED_PIN
-/* Auto-initialized at runtime by pico-sdk via the .mutex_array section
-   sweep in mutex_init_all() (called from runtime_init). The literal
-   initializer matches what `auto_init_recursive_mutex(...)` would produce
-   for a static — we drop `static` so other translation units (led.c) can
-   take the same mutex. */
-__attribute__((section(".mutex_array")))
-recursive_mutex_t cyw43_call_mutex = {
-    .core = { .spin_lock = (spin_lock_t *)1 },
-    .owner = 0,
-    .enter_count = 0,
-};
-
 void cyw43_poll_task(device_t *state) {
     (void)state;
-    recursive_mutex_enter_blocking(&cyw43_call_mutex);
     cyw43_arch_poll();
-    recursive_mutex_exit(&cyw43_call_mutex);
 }
 #endif
 
@@ -177,6 +163,16 @@ void screensaver_task(device_t *state) {
 
 /* Periodically emit heartbeat packets */
 void heartbeat_output_task(device_t *state) {
+    /* DIAGNOSTIC: refresh the state snapshot once per second (slot 12).
+       bit0..7 = active_output, bit8 = tud_connected, bit16..23 = board_role,
+       bit24..31 = uart_tx_queue level. Lets us correlate frozen counters
+       with current state when the dump happens. */
+    uint32_t snap = (uint32_t)(state->active_output & 0xFFu)
+                  | ((uint32_t)(state->tud_connected ? 1u : 0u) << 8)
+                  | ((uint32_t)(state->board_role & 0xFFu) << 16)
+                  | ((uint32_t)(queue_get_level(&state->uart_tx_queue) & 0xFFu) << 24);
+    boot_crumb_data[BOOT_CRUMB_SLOT_STATE_SNAPSHOT] = snap;
+
     /* If firmware upgrade is in progress, don't touch flash_cs */
     if (state->fw.upgrade_in_progress)
         return;
@@ -195,6 +191,15 @@ void heartbeat_output_task(device_t *state) {
     if (is_bootsel_pressed())
         reset_usb_boot(DESKHOP_BOOT_LED_MASK, 0);
 #endif
+
+    /* NOTE: an earlier diagnostic attempt called is_bootsel_pressed() here
+       unconditionally to provide a per-board crumb-dump trigger. That broke
+       core0's XIP — is_bootsel_pressed() overrides the flash QSPI CS pin
+       while core0 is fetching instructions from flash, which faults core0
+       and triggers the watchdog. Confirmed by a dump showing PHASE=BEFORE_
+       TUD_INIT on one board with core1 stuck in heartbeat_output_task. The
+       safe pattern would wrap the call in multicore_lockout; for now we
+       only dump via the kbd hotkey (DUMP_CRUMB_MSG over UART). */
 
     uart_packet_t packet = {
         .type = HEARTBEAT_MSG,

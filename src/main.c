@@ -44,6 +44,7 @@ int main(void) {
         [5] = {.exec = &process_uart_tx_task,     .frequency = _TOP()},      // | Check if there are any packets to send over UART
 #ifdef CYW43_WL_GPIO_LED_PIN
         [6] = {.exec = &cyw43_poll_task,          .frequency = _TOP()},      // | Pump cyw43 / BTstack event loop (poll variant) — Pico W / 2 W only
+        [7] = {.exec = &led_apply_task,           .frequency = _HZ(100)},    // | Apply pending onboard-LED changes (CYW43 SPI write — core0 only)
 #endif
     };                                                                       // `----- then go back and repeat forever
     const int NUM_TASKS = ARRAY_SIZE(tasks_core0);

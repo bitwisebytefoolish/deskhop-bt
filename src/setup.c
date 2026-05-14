@@ -92,34 +92,52 @@ void pio_usb_host_config(device_t *state) {
     - If the entire sequence of values match, we are definitely floating
       so IC is not connected on BOARD_A_RX, and we're BOARD B
 */
+/* Detect socket role by reading BOARD_ROLE_DETECT_PIN (GP18) with an
+   internal pull-up enabled. Carrier mod required: bridge GP18 to its
+   adjacent GND pin on socket A only. Socket B leaves GP18 floating.
+   The internal ~50 kΩ pull-up easily wins against a floating pin
+   (reads high → SOCKET B) but cannot fight a hard external GND
+   (reads low → SOCKET A). Captures the raw read into the DETAIL crumb
+   slot for visibility (and to spot bad solder joints in field). */
+static int run_autoprobe_with_diag(void) {
+    gpio_init(BOARD_ROLE_DETECT_PIN);
+    gpio_set_dir(BOARD_ROLE_DETECT_PIN, GPIO_IN);
+    gpio_pull_up(BOARD_ROLE_DETECT_PIN);
+    sleep_us(200);  /* RC settling — 50 kΩ pull-up against any board parasitics */
+    bool reads_high = gpio_get(BOARD_ROLE_DETECT_PIN);
+    gpio_disable_pulls(BOARD_ROLE_DETECT_PIN);
+
+    /* reads_high == false → externally pulled low (socket A is bridged to GND)
+       reads_high == true  → floating, pull-up wins (socket B has no bridge) */
+    int result = reads_high ? OUTPUT_B : OUTPUT_A;
+
+    /* DIAGNOSTIC: pack the read into DETAIL. Layout (MSB→LSB):
+       byte3 = 0xAB (sentinel "autoprobe")
+       byte2 = BOARD_ROLE_DETECT_PIN number
+       byte1 = 0x01 if pin read high, 0x00 if low
+       byte0 = result (0=A, 1=B) */
+    uint32_t diag = ((uint32_t)0xABu << 24)
+                  | ((uint32_t)(uint8_t)BOARD_ROLE_DETECT_PIN << 16)
+                  | ((uint32_t)(reads_high ? 1u : 0u) << 8)
+                  | (uint32_t)result;
+    boot_crumb_set_detail(diag);
+
+    return result;
+}
+
 int board_autoprobe(void) {
-    const bool probing_sequence[] = {true, false, false, true, true, false, true, false};
-    const int seq_len = ARRAY_SIZE(probing_sequence);
-
-    /* Set the pin as INPUT and initialize it */
-    gpio_init(BOARD_A_RX);
-    gpio_set_dir(BOARD_A_RX, GPIO_IN);
-
-    for (int i=0; i<seq_len; i++) {
-        if (probing_sequence[i])
-            gpio_pull_up(BOARD_A_RX);
-        else
-            gpio_pull_down(BOARD_A_RX);
-
-        /* Wait for value to settle */
-        sleep_ms(3);
-
-        /* Read the value */
-        bool value = gpio_get(BOARD_A_RX);
-        gpio_disable_pulls(BOARD_A_RX);
-
-        /* If values mismatch at any point, means IC is connected and we're board A */
-        if (probing_sequence[i] != value)
-            return OUTPUT_A;
-    }
-
-    /* If it was just reading the pull up/down in all cases, pin is floating and we're board B */
-    return OUTPUT_B;
+    int probed = run_autoprobe_with_diag();
+#ifdef FORCE_BOARD_ROLE
+    /* Build-time override. RP2350-on-deskhop autoprobe currently mis-IDs
+       both boards as A (verified 2026-05-14 via flash crumbs). Flash one
+       Pico with -DFORCE_BOARD_ROLE=0 and the other with =1 until the
+       autoprobe is fixed. The autoprobe still runs above so its DETAIL
+       diag is captured into the crumb — that's how we'll fix it. */
+    (void)probed;
+    return FORCE_BOARD_ROLE;
+#else
+    return probed;
+#endif
 }
 
 
@@ -325,10 +343,13 @@ void initial_setup(device_t *state) {
     boot_crumb_set_phase(PHASE_BEFORE_CYW43_INIT);
     int cyw_rc = cyw43_arch_init();
     watchdog_update();
-    boot_crumb_set_detail((uint32_t)cyw_rc);
     if (cyw_rc != 0) {
         /* If radio init fails there's nothing useful we can do — sit on it so
-           the watchdog reboots us, rather than running with a half-up device. */
+           the watchdog reboots us, rather than running with a half-up device.
+           Stash cyw_rc into DETAIL so the dump reveals what went wrong;
+           on success leave DETAIL alone so the autoprobe diag set earlier
+           (in board_autoprobe → run_autoprobe_with_diag) survives. */
+        boot_crumb_set_detail(0xC9430000u | (uint32_t)((uint8_t)cyw_rc));
         while (1) tight_loop_contents();
     }
     boot_crumb_set_phase(PHASE_AFTER_CYW43_INIT);

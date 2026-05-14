@@ -19,7 +19,7 @@
 /* Backing storage in SCRATCH_X NOLOAD section (see linker script). Survives
    the run that wrote it, but NOT a reset_usb_boot()-triggered BOOTSEL
    transition — that's why we also mirror to flash on crash detection. */
-volatile uint32_t boot_crumb_data[8]
+volatile uint32_t boot_crumb_data[BOOT_CRUMB_NUM_SLOTS]
     __attribute__((section(".scratch_x_noinit"), used));
 
 /* Linker-provided pointer to the start of the 4 KB FLASH_CRUMB region.
@@ -70,9 +70,34 @@ void boot_crumb_check_and_maybe_reenter_bootsel(void) {
 
     /* Cold boot, clean reset, or previous boot already captured — arm
        fresh crumbs for THIS run. PHASE starts at ENTER_MAIN so that any
-       observed crash after this function returns yields a non-zero phase. */
-    boot_crumb_data[BOOT_CRUMB_SLOT_MAGIC]     = BOOT_CRUMB_MAGIC_ARMED;
-    boot_crumb_data[BOOT_CRUMB_SLOT_PHASE]     = PHASE_ENTER_MAIN;
-    boot_crumb_data[BOOT_CRUMB_SLOT_DETAIL]    = 0;
-    boot_crumb_data[BOOT_CRUMB_SLOT_HEARTBEAT] = 0;
+       observed crash after this function returns yields a non-zero phase.
+       Also zero the runtime telemetry counters so they start from 0
+       each session (otherwise SCRATCH_X retains stale values from the
+       previous run if it didn't go through a power cycle). */
+    boot_crumb_data[BOOT_CRUMB_SLOT_MAGIC]          = BOOT_CRUMB_MAGIC_ARMED;
+    boot_crumb_data[BOOT_CRUMB_SLOT_PHASE]          = PHASE_ENTER_MAIN;
+    boot_crumb_data[BOOT_CRUMB_SLOT_DETAIL]         = 0;
+    boot_crumb_data[BOOT_CRUMB_SLOT_HEARTBEAT]      = 0;
+    boot_crumb_data[BOOT_CRUMB_SLOT_TUD_LIFECYCLE]  = 0;
+    boot_crumb_data[BOOT_CRUMB_SLOT_UART_TX]        = 0;
+    boot_crumb_data[BOOT_CRUMB_SLOT_UART_RX]        = 0;
+    boot_crumb_data[BOOT_CRUMB_SLOT_QUEUE_DROPS]    = 0;
+    boot_crumb_data[BOOT_CRUMB_SLOT_STATE_SNAPSHOT] = 0;
+    boot_crumb_data[BOOT_CRUMB_SLOT_RELAY_BRANCH]   = 0;
+    boot_crumb_data[BOOT_CRUMB_SLOT_TX_DMA]         = 0;
+    boot_crumb_data[BOOT_CRUMB_SLOT_LINK_DIAG]      = 0;
+}
+
+void boot_crumb_dump_to_bootsel(void) {
+    /* Force a watchdog reboot — boot_crumb_check_and_maybe_reenter_bootsel
+       at the top of main() will see ARMED magic + watchdog_caused_reboot,
+       mirror crumbs to flash, and drop into BOOTSEL. We funnel through
+       reboot rather than calling flash_range_erase directly here because
+       this can be invoked from core1 (hotkey handler runs in core1's
+       USB-host task chain). Flash erase stalls XIP, which would deadlock
+       core0 if it happens to be fetching from flash at the moment. The
+       boot-time path runs on core0 only before core1 is launched, so
+       it's the safe place to touch flash. */
+    watchdog_reboot(0, 0, 1);
+    while (1) tight_loop_contents();
 }

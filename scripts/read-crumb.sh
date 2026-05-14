@@ -43,7 +43,10 @@ if [[ -z "$SYM_LINE" ]]; then
 fi
 SYM_ADDR=$(echo "$SYM_LINE" | awk '{print $1}')
 ADDR_START="0x${SYM_ADDR}"
-ADDR_END=$(printf '0x%08x' $((ADDR_START + 32)))
+# 16 slots × 4 bytes = 64 bytes. The slot layout grew from 8 to 16 to
+# carry routing-bug telemetry (TX/RX/drop counters etc); keep the dump
+# range in sync with sizeof(boot_crumb_data).
+ADDR_END=$(printf '0x%08x' $((ADDR_START + 64)))
 echo "   _boot_crumb_flash (flash mirror) @ $ADDR_START..$ADDR_END"
 
 echo
@@ -151,16 +154,16 @@ dump_one() {
     fi
 
     echo
-    echo ">> 32-byte dump:"
-    od -An -tx1 -v -N 32 "$tmp" | sed 's/^/   /'
+    echo ">> 64-byte dump:"
+    od -An -tx1 -v -N 64 "$tmp" | sed 's/^/   /'
 
     local words=()
     while IFS= read -r w; do
         words+=("$w")
-    done < <(od -An -tx4 -v -N 32 "$tmp" | tr -s ' ' '\n' | grep -v '^$')
+    done < <(od -An -tx4 -v -N 64 "$tmp" | tr -s ' ' '\n' | grep -v '^$')
 
-    if (( ${#words[@]} < 8 )); then
-        echo "** parse error: got ${#words[@]} words, expected 8 **" >&2
+    if (( ${#words[@]} < 16 )); then
+        echo "** parse error: got ${#words[@]} words, expected 16 **" >&2
         rm -f "$tmp"
         return 1
     fi
@@ -172,7 +175,28 @@ dump_one() {
     echo
     printf '   [0] MAGIC      = 0x%s  %s\n' "${words[0]}" "$(decode_magic "${words[0]}")"
     printf '   [1] PHASE      = 0x%s  %s\n' "${words[1]}" "$(decode_phase "${words[1]}")"
-    printf '   [2] DETAIL     = 0x%s\n' "${words[2]}"
+    local s2="${words[2]}"
+    local s2_decoded=""
+    case "0x${s2:0:2}" in
+        0xab)  # autoprobe diag (single-pin GND-bridge): byte3=AB, byte2=pin, byte1=read, byte0=result
+            local pin=$((16#${s2:2:2}))
+            local read=$((16#${s2:4:2}))
+            local resb=$((16#${s2:6:2}))
+            local read_str=$([ "$read" = "1" ] && echo "HIGH (floats)" || echo "LOW (grounded)")
+            local role_str=$([ "$resb" = "0" ] && echo OUTPUT_A || echo OUTPUT_B)
+            s2_decoded=$(printf "(autoprobe: GP%d read=%s → %s)" \
+                "$pin" "$read_str" "$role_str")
+            ;;
+        0xc9)  # cyw43_arch_init failure: byte3=C9, byte2=43, byte1=00, byte0=err
+            local err=$((16#${s2:6:2}))
+            s2_decoded=$(printf "(cyw43_arch_init failed, rc=%d)" "$err")
+            ;;
+        0xf0)  # FORCE_BOARD_ROLE override: 0xF000B0xx (legacy encoding, no longer set)
+            local forced=$((16#${s2:6:2}))
+            s2_decoded="(FORCE_BOARD_ROLE override: $forced = $([ "$forced" = "0" ] && echo A || echo B))"
+            ;;
+    esac
+    printf '   [2] DETAIL     = 0x%s  %s\n' "$s2" "$s2_decoded"
     printf '   [3] HEARTBEAT  = 0x%s  (core0=%d  core1=%d)\n' "$hb" "$hb_core0" "$hb_core1"
     # slot[4] tags the core0 task currently executing (0xCC00xxxx).
     local s4="${words[4]}"
@@ -185,6 +209,7 @@ dump_one() {
         0xcc000004) s4_decoded="process_hid_queue_task (core0 task[4])" ;;
         0xcc000005) s4_decoded="process_uart_tx_task (core0 task[5])" ;;
         0xcc000006) s4_decoded="cyw43_poll_task (core0 task[6])" ;;
+        0xcc000007) s4_decoded="led_apply_task (core0 task[7])" ;;
         0xcc00ffff) s4_decoded="(between passes — no task active)" ;;
         0x00000000) s4_decoded="(unset — never reached main loop)" ;;
         *)          s4_decoded="UNKNOWN (0x$s4)" ;;
@@ -223,6 +248,41 @@ dump_one() {
         *)          s7_decoded="UNKNOWN (0x$s7)" ;;
     esac
     printf '   [7] core1 task = 0x%s  %s\n' "$s7" "$s7_decoded"
+
+    # --- Routing-bug telemetry (slots 8..15) ---
+    # Split each 32-bit word into hi/lo 16b decimal counts for readability.
+    split_lohi() {
+        local w="$1"
+        local lo=$((16#${w:4:4}))
+        local hi=$((16#${w:0:4}))
+        printf '%5d / %5d' "$lo" "$hi"
+    }
+    local s8="${words[8]}"
+    local s9="${words[9]}"
+    local s10="${words[10]}"
+    local s11="${words[11]}"
+    local s12="${words[12]}"
+    local s13="${words[13]}"
+    local s14="${words[14]}"
+    echo
+    echo "   --- Routing telemetry (lo/hi 16b — saturating at 65535) ---"
+    printf '   [8]  TUD_LIFECYCLE   = 0x%s  (mounts/unmounts: %s)\n' "$s8" "$(split_lohi "$s8")"
+    printf '   [9]  UART_TX         = 0x%s  (kbd/mouse pkts queued: %s)\n' "$s9" "$(split_lohi "$s9")"
+    printf '   [10] UART_RX         = 0x%s  (kbd/mouse pkts received: %s)\n' "$s10" "$(split_lohi "$s10")"
+    printf '   [11] QUEUE_DROPS     = 0x%s  (kbd/mouse !tud_connected drops: %s)\n' "$s11" "$(split_lohi "$s11")"
+
+    # slot 12 is a state snapshot, not a counter — decode bitfields.
+    local s12_active=$((16#${s12:6:2}))
+    local s12_tud=$(( (16#${s12:4:2}) & 0x01 ))
+    local s12_role=$((16#${s12:2:2}))
+    local s12_qlvl=$((16#${s12:0:2}))
+    printf '   [12] STATE_SNAPSHOT  = 0x%s  (active_output=%d, tud_connected=%d, board_role=%d, uart_tx_q=%d)\n' \
+        "$s12" "$s12_active" "$s12_tud" "$s12_role" "$s12_qlvl"
+
+    printf '   [13] RELAY_BRANCH    = 0x%s  (kbd/mouse relay-branch hits: %s)\n' "$s13" "$(split_lohi "$s13")"
+    printf '   [14] TX_DMA          = 0x%s  (kickoffs/busy-skips: %s)\n' "$s14" "$(split_lohi "$s14")"
+    local s15="${words[15]}"
+    printf '   [15] LINK_DIAG       = 0x%s  (heartbeat-RX / checksum-fail: %s)\n' "$s15" "$(split_lohi "$s15")"
 
     rm -f "$tmp"
 }

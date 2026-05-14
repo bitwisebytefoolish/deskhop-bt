@@ -106,7 +106,16 @@ hotkey_combo_t hotkeys[] = {
      .keys           = {HID_KEY_B},
      .key_count      = 1,
      .acknowledge    = true,
-     .action_handler = &fw_upgrade_hotkey_handler_B}};
+     .action_handler = &fw_upgrade_hotkey_handler_B},
+
+    /* DIAGNOSTIC: Left Ctrl + Right Ctrl + D ==> snapshot runtime crumb
+       counters to flash on BOTH boards and reboot into BOOTSEL. Both
+       boards then dump their telemetry for picotool to read. */
+    {.modifier       = KEYBOARD_MODIFIER_LEFTCTRL | KEYBOARD_MODIFIER_RIGHTCTRL,
+     .keys           = {HID_KEY_D},
+     .key_count      = 1,
+     .acknowledge    = true,
+     .action_handler = &dump_crumb_hotkey_handler}};
 
 /* ============================================================ *
  * Detect if any hotkeys were pressed
@@ -245,8 +254,13 @@ void process_kbd_queue_task(device_t *state) {
 
 void queue_kbd_report(hid_keyboard_report_t *report, device_t *state) {
     /* It wouldn't be fun to queue up a bunch of messages and then dump them all on host */
-    if (!state->tud_connected)
+    if (!state->tud_connected) {
+        /* DIAGNOSTIC: slot 11 low = kbd report silently dropped because
+           tud_connected is false. If this climbs after the switch but
+           UART_RX kbd count was high, hypothesis A is confirmed. */
+        boot_crumb_inc_low16(BOOT_CRUMB_SLOT_QUEUE_DROPS);
         return;
+    }
 
     queue_try_add(&state->kbd_queue, report);
 }
@@ -262,6 +276,10 @@ void send_key(hid_keyboard_report_t *report, device_t *state) {
         queue_kbd_report(&combined_report, state);
         state->last_activity[BOARD_ROLE] = time_us_64();
     } else {
+        /* DIAGNOSTIC: slot 13 low = times kbd took the relay (UART) branch.
+           If this stays 0 after switch, the sending board still thinks
+           it's the active output (active_output update didn't take). */
+        boot_crumb_inc_low16(BOOT_CRUMB_SLOT_RELAY_BRANCH);
         /* Send the combined report to ensure all keys are included */
         queue_packet((uint8_t *)&combined_report, KEYBOARD_REPORT_MSG, KBD_REPORT_LENGTH);
     }

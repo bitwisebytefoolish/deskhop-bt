@@ -89,11 +89,13 @@ void tud_hid_set_report_cb(uint8_t instance,
 /* Invoked when device is mounted */
 void tud_mount_cb(void) {
     global_state.tud_connected = true;
+    boot_crumb_inc_low16(BOOT_CRUMB_SLOT_TUD_LIFECYCLE);
 }
 
 /* Invoked when device is unmounted */
 void tud_umount_cb(void) {
     global_state.tud_connected = false;
+    boot_crumb_inc_high16(BOOT_CRUMB_SLOT_TUD_LIFECYCLE);
 }
 
 #ifdef DH_DEBUG_CDC_FLASH
@@ -198,7 +200,9 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_re
         global_state.mouse_connected = true;
     }
 
-    /* Flash local led to indicate a device was connected */
+    /* Flash local led to indicate a device was connected.
+       On CYW43 boards this is suspended via blink_led itself — see comment
+       in led.c. */
     blink_led(&global_state);
 
     /* Also signal the other board to flash LED, to enable easy verification if serial works */

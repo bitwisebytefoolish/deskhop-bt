@@ -61,6 +61,19 @@ void fw_upgrade_hotkey_handler_B(device_t *state, hid_keyboard_report_t *report)
     send_value(ENABLE, FIRMWARE_UPGRADE_MSG);
 };
 
+/* DIAGNOSTIC: dump runtime crumb counters to flash + BOOTSEL on BOTH boards.
+   Triggered by a keyboard hotkey (see hotkeys[] in keyboard.c). Sends a
+   DUMP_CRUMB_MSG to the other board first, waits briefly for UART to drain,
+   then flushes our own crumbs and reboots into BOOTSEL. Result: picotool
+   sees two boards in BOOTSEL; scripts/read-crumb.sh can read each. */
+void dump_crumb_hotkey_handler(device_t *state, hid_keyboard_report_t *report) {
+    send_value(ENABLE, DUMP_CRUMB_MSG);
+    /* Let DMA drain the queued packet before we yank ourselves into BOOTSEL.
+       process_uart_tx_task runs on core0 at _TOP() rate; 50 ms is plenty. */
+    sleep_ms(50);
+    boot_crumb_dump_to_bootsel();
+}
+
 /* This key combo prevents mouse from switching outputs */
 void switchlock_hotkey_handler(device_t *state, hid_keyboard_report_t *report) {
     state->switch_lock ^= 1;
@@ -161,6 +174,9 @@ void config_enable_hotkey_handler(device_t *state, hid_keyboard_report_t *report
 
 /* Function handles received keypresses from the other board */
 void handle_keyboard_uart_msg(uart_packet_t *packet, device_t *state) {
+    /* DIAGNOSTIC: slot 10 low = kbd packets received from other board. */
+    boot_crumb_inc_low16(BOOT_CRUMB_SLOT_UART_RX);
+
     hid_keyboard_report_t *report = (hid_keyboard_report_t *)packet->data;
     hid_keyboard_report_t combined_report;
 
@@ -177,6 +193,9 @@ void handle_keyboard_uart_msg(uart_packet_t *packet, device_t *state) {
 
 /* Function handles received mouse moves from the other board */
 void handle_mouse_abs_uart_msg(uart_packet_t *packet, device_t *state) {
+    /* DIAGNOSTIC: slot 10 high = mouse packets received from other board. */
+    boot_crumb_inc_high16(BOOT_CRUMB_SLOT_UART_RX);
+
     mouse_report_t *mouse_report = (mouse_report_t *)packet->data;
     queue_mouse_report(mouse_report, state);
 
@@ -199,6 +218,12 @@ void handle_output_select_msg(uart_packet_t *packet, device_t *state) {
 /* On firmware upgrade message, reboot into the BOOTSEL fw upgrade mode */
 void handle_fw_upgrade_msg(uart_packet_t *packet, device_t *state) {
     reset_usb_boot(DESKHOP_BOOT_LED_MASK, 0);
+}
+
+/* DIAGNOSTIC: peer asked us to dump crumbs. Mirror crumbs to flash and
+   reboot into BOOTSEL so the developer can read them with picotool. */
+void handle_dump_crumb_msg(uart_packet_t *packet, device_t *state) {
+    boot_crumb_dump_to_bootsel();
 }
 
 /* Comply with request to turn mouse zoom mode on/off  */
@@ -342,7 +367,7 @@ void handle_response_byte_msg(uart_packet_t *packet, device_t *state) {
     else {
         /* Provide visual feedback of the ongoing copy by toggling LED for every sector */
         if((address & 0xfff) == 0x000)
-            toggle_led();
+            toggle_led(state);
     }
 
     /* Update checksum as we receive each byte */
@@ -359,6 +384,12 @@ void handle_response_byte_msg(uart_packet_t *packet, device_t *state) {
 
 /* Process a request to read a firmware package from flash */
 void handle_heartbeat_msg(uart_packet_t *packet, device_t *state) {
+    /* DIAGNOSTIC: slot 15 low = heartbeats received from peer. 1 Hz baseline
+       — if this climbs over time, the UART link is alive in this direction.
+       If it stays 0 while peer's TX_DMA shows kickoffs, the line is broken
+       (TX-side wiring, RX-side wiring, or RX DMA stuck). */
+    boot_crumb_inc_low16(BOOT_CRUMB_SLOT_LINK_DIAG);
+
     uint16_t other_running_version = packet->data16[0];
 
     if (state->fw.upgrade_in_progress)

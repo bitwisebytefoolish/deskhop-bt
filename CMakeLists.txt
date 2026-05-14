@@ -14,6 +14,15 @@ set(DP_PIN_DEFAULT 14 CACHE STRING "Default USB D+ Pin Number")
 set(PIO_USE_TINYUSB 1 CACHE STRING "Make TinyUSB Manage the PIO USB Port")
 set(PICO_BOARD "pico" CACHE STRING "Target board: 'pico' (RP2040) or 'pico2_w' (RP2350 + CYW43439). See issue #2.")
 
+## Optional manual override of board_autoprobe. Set to 0 (A) or 1 (B) to
+## skip the GP13 pull-toggle probe and force the board_role. Needed on
+## RP2350 carriers where the probe mis-identifies both Picos as A (see
+## memory/deskhop-bt_debug_state.md). Unset (or empty) = use autoprobe.
+set(FORCE_BOARD_ROLE "" CACHE STRING "Force board_role at build time: 0=A, 1=B, empty=autoprobe")
+if (NOT "${FORCE_BOARD_ROLE}" STREQUAL "")
+    add_definitions(-DFORCE_BOARD_ROLE=${FORCE_BOARD_ROLE})
+endif()
+
 ## Pico SDK Configuration
 set(PICO_SDK_FETCH_FROM_GIT off)
 set(PICO_SDK_PATH ${CMAKE_CURRENT_LIST_DIR}/pico-sdk)
