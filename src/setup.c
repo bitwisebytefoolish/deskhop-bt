@@ -235,8 +235,9 @@ void initial_setup(device_t *state) {
 #ifdef CYW43_WL_GPIO_LED_PIN
     /* Initialise the CYW43439 wireless module. Must run before deskhop_led_init()
        because on these boards the on-board LED is a virtual GPIO inside the
-       wireless module — cyw43_arch_gpio_put fails without this. BTstack will
-       also use this radio once #6 / #9 are wired up. */
+       wireless module. The `poll` cyw43_arch variant is used (see CMakeLists);
+       it requires periodic cyw43_arch_poll() calls — handled by cyw43_poll_task
+       in src/tasks.c. */
     if (cyw43_arch_init() != 0) {
         /* If radio init fails there's nothing useful we can do — sit on it so
            the watchdog reboots us, rather than running with a half-up device. */
@@ -245,7 +246,11 @@ void initial_setup(device_t *state) {
 #endif
 
     /* Initialise the on-board LED (platform-specific — direct GPIO on the
-       original Pico, CYW43 virtual GPIO on Pi Pico W / 2 W). */
+       original Pico, CYW43 virtual GPIO on Pi Pico W / 2 W). On Pico W / 2 W
+       this also primes the cyw43 PIO SPI path: without an early "warm" cyw43
+       call, the first gpio_put after watchdog_enable can take long enough
+       to do its lazy SPI setup that the 500 ms watchdog fires and reboots
+       the chip mid-init. Confirmed by bisect on real Pico 2 W hardware. */
     deskhop_led_init();
 
     /* Check if we should boot in configuration mode or not */
@@ -287,8 +292,10 @@ void initial_setup(device_t *state) {
     /* Update the core1 initial pass timestamp before enabling the watchdog */
     state->core1_last_loop_pass = time_us_64();
 
-    /* Setup the watchdog so we reboot and recover from a crash */
-    watchdog_enable(WATCHDOG_TIMEOUT, WATCHDOG_PAUSE_ON_DEBUG);
+    /* DIAGNOSTIC: long watchdog timeout (8 seconds, max for rp2350) to test
+       whether the production hang is a timing issue around the first
+       cyw43 gpio_put + first kick_watchdog_task firing. */
+    watchdog_enable(8000, WATCHDOG_PAUSE_ON_DEBUG);
 }
 
 /* ==========  End of Initial Board Setup  ========== */

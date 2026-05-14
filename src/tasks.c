@@ -11,6 +11,10 @@
 
 #include "main.h"
 
+#ifdef CYW43_WL_GPIO_LED_PIN
+#include "pico/cyw43_arch.h"
+#endif
+
 void task_scheduler(device_t *state, task_t *task) {
     uint64_t current_time = time_us_64();
 
@@ -52,6 +56,18 @@ void usb_host_task(device_t *state) {
     if (tuh_inited())
         tuh_task();
 }
+
+/* On CYW43-equipped boards we use the `poll` cyw43_arch variant (see
+   CMakeLists), which means we need to pump the cyw43 / BTstack event
+   loop ourselves. Without this, the radio sits idle. The threadsafe-
+   background variant would run this on a hardware-IRQ context, but
+   that allocation hangs on deskhop's existing IRQ/alarm-heavy setup. */
+#ifdef CYW43_WL_GPIO_LED_PIN
+void cyw43_poll_task(device_t *state) {
+    (void)state;
+    cyw43_arch_poll();
+}
+#endif
 
 mouse_report_t *screensaver_pong(device_t *state) {
     static mouse_report_t report = {0};

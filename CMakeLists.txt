@@ -117,15 +117,20 @@ set(COMMON_LINK_LIBRARIES
 ## reachable via cyw43_arch_gpio_*. The Bluetooth radio also sits on the
 ## same module and is driven through BTstack via cyw43_arch.
 ##
-## We link the `threadsafe_background` variant — it runs CYW43 callbacks on
-## an internal background context (IRQ + alarm pool), so deskhop's existing
-## core1 task scheduler doesn't need to poll cyw43_arch_poll() itself. The
-## non-lwip variant is chosen because we don't need Wi-Fi networking.
+## We link the `poll` variant rather than `threadsafe_background`. The
+## threadsafe-background async context allocates a hardware alarm and a
+## user IRQ at init time; in firmware that already uses hardware alarms
+## and IRQs heavily (deskhop has DMA-driven UART, watchdog, custom task
+## scheduler) that allocation hangs indefinitely inside cyw43_arch_init.
+## Switching to poll sidesteps the issue. The trade-off is that we have
+## to call cyw43_arch_poll() in our task loop ourselves — see
+## src/tasks.c. (See https://github.com/phieri/viking-bio-matter/pull/75
+## for the same finding from another project.)
 ##
 ## BTstack itself is not linked here — that comes with the hid_host work
 ## (#6 keyboard, #9 mouse).
 if(PICO_CYW43_SUPPORTED)
-    list(APPEND COMMON_LINK_LIBRARIES pico_cyw43_arch_threadsafe_background)
+    list(APPEND COMMON_LINK_LIBRARIES pico_cyw43_arch_poll)
 endif()
 set(binary deskhop)
 

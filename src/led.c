@@ -42,11 +42,20 @@ static inline bool deskhop_led_get(void)   { return gpio_get(GPIO_LED_PIN); }
 #endif
 
 void deskhop_led_init(void) {
-#ifndef CYW43_WL_GPIO_LED_PIN
+#ifdef CYW43_WL_GPIO_LED_PIN
+    /* On CYW43 boards the LED virtual GPIO is set up by cyw43_arch_init().
+       We also do a "priming" gpio_put here so the cyw43 PIO SPI path
+       completes any lazy setup BEFORE the 500 ms watchdog gets enabled
+       at the end of initial_setup. Without this, the first cyw43 gpio_put
+       AFTER watchdog_enable (from restore_leds in set_active_output)
+       can run long enough to trip the watchdog, rebooting the chip in a
+       loop and preventing USB device enumeration. Found by bisect on
+       real Pico 2 W hardware. */
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+#else
     gpio_init(GPIO_LED_PIN);
     gpio_set_dir(GPIO_LED_PIN, GPIO_OUT);
 #endif
-    /* On CYW43 boards the LED virtual GPIO is set up by cyw43_arch_init() — #4. */
 }
 
 /* ==================================================== *
