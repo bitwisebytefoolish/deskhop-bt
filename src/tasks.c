@@ -61,11 +61,32 @@ void usb_host_task(device_t *state) {
    CMakeLists), which means we need to pump the cyw43 / BTstack event
    loop ourselves. Without this, the radio sits idle. The threadsafe-
    background variant would run this on a hardware-IRQ context, but
-   that allocation hangs on deskhop's existing IRQ/alarm-heavy setup. */
+   that allocation hangs on deskhop's existing IRQ/alarm-heavy setup.
+
+   IMPORTANT: the poll variant is single-thread. Calls into the driver
+   from core1 (e.g. led_blinking_task → restore_leds → cyw43_arch_gpio_put)
+   race with this poll on core0 and deadlock the driver — observed via
+   boot crumbs as core0 stuck in cyw43_poll_task while core1 stuck in
+   led_blinking_task. The recursive mutex serializes all access. */
+
 #ifdef CYW43_WL_GPIO_LED_PIN
+/* Auto-initialized at runtime by pico-sdk via the .mutex_array section
+   sweep in mutex_init_all() (called from runtime_init). The literal
+   initializer matches what `auto_init_recursive_mutex(...)` would produce
+   for a static — we drop `static` so other translation units (led.c) can
+   take the same mutex. */
+__attribute__((section(".mutex_array")))
+recursive_mutex_t cyw43_call_mutex = {
+    .core = { .spin_lock = (spin_lock_t *)1 },
+    .owner = 0,
+    .enter_count = 0,
+};
+
 void cyw43_poll_task(device_t *state) {
     (void)state;
+    recursive_mutex_enter_blocking(&cyw43_call_mutex);
     cyw43_arch_poll();
+    recursive_mutex_exit(&cyw43_call_mutex);
 }
 #endif
 

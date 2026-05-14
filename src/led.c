@@ -34,28 +34,39 @@
 
 #ifdef CYW43_WL_GPIO_LED_PIN
 #include "pico/cyw43_arch.h"
-static inline void deskhop_led_put(bool v) { cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, v); }
-static inline bool deskhop_led_get(void)   { return cyw43_arch_gpio_get(CYW43_WL_GPIO_LED_PIN); }
+#include "tasks.h" /* for cyw43_call_mutex */
+/* The poll cyw43_arch variant is NOT multi-core safe. Without locking,
+   core0's cyw43_poll_task can race with core1's restore_leds path here
+   and deadlock the driver — confirmed by boot crumbs (slot[4] = core0 in
+   cyw43_poll_task, slot[7] = core1 in led_blinking_task). The recursive
+   mutex (declared extern in tasks.h, defined in tasks.c) serializes all
+   cyw43_arch_* access across both cores. The trailing cyw43_arch_poll()
+   ensures the GPIO SPI op completes before we drop the lock — otherwise
+   a subsequent poll on the other core could pick up a half-completed
+   transaction. */
+static inline void deskhop_led_put(bool v) {
+    recursive_mutex_enter_blocking(&cyw43_call_mutex);
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, v);
+    cyw43_arch_poll();
+    recursive_mutex_exit(&cyw43_call_mutex);
+}
+static inline bool deskhop_led_get(void)   {
+    recursive_mutex_enter_blocking(&cyw43_call_mutex);
+    bool v = cyw43_arch_gpio_get(CYW43_WL_GPIO_LED_PIN);
+    recursive_mutex_exit(&cyw43_call_mutex);
+    return v;
+}
 #else
 static inline void deskhop_led_put(bool v) { gpio_put(GPIO_LED_PIN, v); }
 static inline bool deskhop_led_get(void)   { return gpio_get(GPIO_LED_PIN); }
 #endif
 
 void deskhop_led_init(void) {
-#ifdef CYW43_WL_GPIO_LED_PIN
-    /* On CYW43 boards the LED virtual GPIO is set up by cyw43_arch_init().
-       We also do a "priming" gpio_put here so the cyw43 PIO SPI path
-       completes any lazy setup BEFORE the 500 ms watchdog gets enabled
-       at the end of initial_setup. Without this, the first cyw43 gpio_put
-       AFTER watchdog_enable (from restore_leds in set_active_output)
-       can run long enough to trip the watchdog, rebooting the chip in a
-       loop and preventing USB device enumeration. Found by bisect on
-       real Pico 2 W hardware. */
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
-#else
+#ifndef CYW43_WL_GPIO_LED_PIN
     gpio_init(GPIO_LED_PIN);
     gpio_set_dir(GPIO_LED_PIN, GPIO_OUT);
 #endif
+    /* On CYW43 boards the LED virtual GPIO is set up by cyw43_arch_init() — #4. */
 }
 
 /* ==================================================== *

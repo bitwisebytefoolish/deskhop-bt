@@ -30,6 +30,7 @@ __METADATA_LEN = 4k;
 __TOTAL_IMAGE_LENGTH = __FLASH_LEN + __DISK_IMAGE_LEN + __METADATA_LEN;
 __STAGING_LEN = 1024k;
 __CONFIG_STORAGE_LEN = 4k;
+__CRUMB_STORAGE_LEN = 4k;
 __FLASH_TOTAL_SIZE = 4096k;
 
 MEMORY
@@ -39,11 +40,19 @@ MEMORY
     FW_METADATA(rw)   : ORIGIN = 0x10000000 + __FLASH_LEN + __DISK_IMAGE_LEN, LENGTH = __METADATA_LEN
     FW_STAGING(rw)    : ORIGIN = 0x10000000 + __TOTAL_IMAGE_LENGTH, LENGTH = __STAGING_LEN
 
+    /* 4 KB sector for debug boot-crumbs that need to survive a
+       reset_usb_boot() transition into the bootrom (which wipes all SRAM
+       including SCRATCH_X — verified empirically by tracer slots). The
+       firmware writes the SRAM crumb snapshot here on crash detection
+       BEFORE calling reset_usb_boot; picotool then reads it post-BOOTSEL. */
+    FLASH_CRUMB(rw)   : ORIGIN = 0x10000000 + (__FLASH_TOTAL_SIZE - __CONFIG_STORAGE_LEN - __CRUMB_STORAGE_LEN), LENGTH = __CRUMB_STORAGE_LEN
     FLASH_CONFIG(rw)  : ORIGIN = 0x10000000 + (__FLASH_TOTAL_SIZE - __CONFIG_STORAGE_LEN), LENGTH = __CONFIG_STORAGE_LEN
     RAM(rwx)          : ORIGIN = 0x20000000, LENGTH = 512k
     SCRATCH_X(rwx)    : ORIGIN = 0x20080000, LENGTH = 4k
     SCRATCH_Y(rwx)    : ORIGIN = 0x20081000, LENGTH = 4k
 }
+
+PROVIDE(_boot_crumb_flash = ORIGIN(FLASH_CRUMB));
 
 PROVIDE(_staging_metadata = ORIGIN(FW_STAGING) + (__STAGING_LEN - __METADATA_LEN));
 PROVIDE(_firmware_metadata = ORIGIN(FW_METADATA));
@@ -190,10 +199,15 @@ SECTIONS
 
     __etext = LOADADDR(.data);
 
+    /* NOLOAD + explicit `AT> RAM` so the section's LMA stays in RAM rather
+       than inheriting a flash LMA from the preceding section. Without this,
+       objcopy's segment layout check (in the post-build CRC step) collides
+       with .flash_end once any object actually lands in this section
+       (e.g. boot_crumb_data). */
     .uninitialized_data (NOLOAD): {
         . = ALIGN(4);
         *(.uninitialized_data*)
-    } > RAM
+    } > RAM AT> RAM
 
     /* Start and end symbols must be word-aligned */
     .scratch_x : {
@@ -203,6 +217,19 @@ SECTIONS
         __scratch_x_end__ = .;
     } > SCRATCH_X AT > FLASH
     __scratch_x_source__ = LOADADDR(.scratch_x);
+
+    /* NOLOAD scratch_x subsection for crumbs that must survive both a
+       watchdog reset AND a subsequent reset_usb_boot() into the bootrom.
+       SCRATCH_X is a separate 4 KB SRAM bank that the RP2350 USB bootrom
+       does not appear to use as workspace, unlike the main SRAM bank
+       (where bootrom uses some of the lower addresses for USB endpoint
+       buffers during BOOTSEL). NOLOAD + `AT> SCRATCH_X` keeps LMA in
+       SCRATCH_X so the post-build objcopy step doesn't see an LMA
+       conflict (same gotcha as .uninitialized_data above). */
+    .scratch_x_noinit (NOLOAD): {
+        . = ALIGN(4);
+        *(.scratch_x_noinit*)
+    } > SCRATCH_X AT> SCRATCH_X
 
     .scratch_y : {
         __scratch_y_start__ = .;

@@ -23,6 +23,18 @@ firmware_metadata_t _firmware_metadata __attribute__((section(".section_metadata
  * ================================================== */
 
 int main(void) {
+    /* DEBUG: if we just rebooted from a hang, jump into BOOTSEL so the
+       developer can dump SRAM crumbs with picotool. See boot_crumb.h. */
+
+    /* TRACER: slot[5] is not zeroed by any path in boot_crumb_check, so a
+       non-zero value here on read tells us we at least got into main()
+       (vs. SCRATCH_X being entirely wiped). 0xAAAAAAAA before the check,
+       0xBBBBBBBB after — narrows down whether boot_crumb_check returned. */
+    boot_crumb_data[5] = 0xAAAAAAAAu;
+    boot_crumb_check_and_maybe_reenter_bootsel();
+    boot_crumb_data[5] = 0xBBBBBBBBu;
+    boot_crumb_set_phase(PHASE_ENTER_MAIN);
+
     static task_t tasks_core0[] = {
         [0] = {.exec = &usb_device_task,          .frequency = _TOP()},      // .-> USB device task, needs to run as often as possible
         [1] = {.exec = &kick_watchdog_task,       .frequency = _HZ(30)},     // | Verify core1 is still running and if so, reset watchdog timer
@@ -42,12 +54,30 @@ int main(void) {
     // Initial board setup
     initial_setup(device);
 
+    boot_crumb_set_phase(PHASE_BEFORE_SET_ACTIVE);
     // Initial state, A is the default output
     set_active_output(device, OUTPUT_A);
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_SET_ACTIVE);
 
+    boot_crumb_set_phase(PHASE_MAIN_LOOP_FIRST_ITER);
+    uint16_t core0_hb = 0;
+    uint32_t core0_tick = 0;
     while (true) {
-        for (int i = 0; i < NUM_TASKS; i++)
+        for (int i = 0; i < NUM_TASKS; i++) {
+            /* DEBUG: tag the slot with current task index BEFORE executing.
+               If the firmware hangs in this task, the slot tells us which
+               one. Cleared after each pass completes (see below). */
+            boot_crumb_data[BOOT_CRUMB_SLOT_CORE0_TASK] = BOOT_CRUMB_CORE0_TASK_TAG | (uint32_t)i;
             task_scheduler(device, &tasks_core0[i]);
+        }
+        /* Mark "between passes" so a hang during the for-loop control flow
+           itself reads as 0xCC00FFFF rather than the last-completed task. */
+        boot_crumb_data[BOOT_CRUMB_SLOT_CORE0_TASK] = BOOT_CRUMB_CORE0_TASK_TAG | 0xFFFFu;
+        if ((++core0_tick & 0xFFFF) == 0) {
+            boot_crumb_core0_hb(++core0_hb);
+            boot_crumb_set_phase(PHASE_MAIN_LOOP_RUNNING);
+        }
     }
 }
 
@@ -62,12 +92,20 @@ void core1_main() {
     };                                                                       // `----- then go back and repeat forever
     const int NUM_TASKS = ARRAY_SIZE(tasks_core1);
 
+    uint16_t core1_hb = 0;
+    uint32_t core1_tick = 0;
     while (true) {
         // Update the timestamp, so core0 can figure out if we're dead
         device->core1_last_loop_pass = time_us_64();
 
-        for (int i = 0; i < NUM_TASKS; i++)
+        for (int i = 0; i < NUM_TASKS; i++) {
+            boot_crumb_data[BOOT_CRUMB_SLOT_CORE1_TASK] = BOOT_CRUMB_CORE1_TASK_TAG | (uint32_t)i;
             task_scheduler(device, &tasks_core1[i]);
+        }
+        boot_crumb_data[BOOT_CRUMB_SLOT_CORE1_TASK] = BOOT_CRUMB_CORE1_TASK_TAG | 0xFFFFu;
+
+        if ((++core1_tick & 0xFFFF) == 0)
+            boot_crumb_core1_hb(++core1_hb);
     }
 }
 /* =======  End of Main Program Loops  ======= */

@@ -33,6 +33,7 @@ __METADATA_LEN = 4k;
 __TOTAL_IMAGE_LENGTH = 256k;
 
 __CONFIG_STORAGE_LEN = 4k;
+__CRUMB_STORAGE_LEN = 4k;
 
 MEMORY
 {
@@ -41,6 +42,8 @@ MEMORY
     FW_METADATA(rw) : ORIGIN = 0x10000000 + (__TOTAL_IMAGE_LENGTH - __METADATA_LEN), LENGTH = __METADATA_LEN
     FW_STAGING(rw) : ORIGIN = 0x10000000 + __TOTAL_IMAGE_LENGTH, LENGTH = __TOTAL_IMAGE_LENGTH
 
+    /* See rp2350 memory_map for boot-crumb flash storage rationale. */
+    FLASH_CRUMB(rw) : ORIGIN = 0x10000000 + (2048k - __CONFIG_STORAGE_LEN - __CRUMB_STORAGE_LEN), LENGTH = __CRUMB_STORAGE_LEN
     FLASH_CONFIG(rw) : ORIGIN = 0x10000000 + (2048k - __CONFIG_STORAGE_LEN), LENGTH = __CONFIG_STORAGE_LEN
     RAM(rwx) : ORIGIN =  0x20000000, LENGTH = 256k
     SCRATCH_X(rwx) : ORIGIN = 0x20040000, LENGTH = 4k
@@ -48,6 +51,7 @@ MEMORY
 }
 PROVIDE(_staging_metadata = ORIGIN(FW_STAGING) + (__TOTAL_IMAGE_LENGTH - __METADATA_LEN));
 PROVIDE(_firmware_metadata = ORIGIN(FW_METADATA));
+PROVIDE(_boot_crumb_flash = ORIGIN(FLASH_CRUMB));
 
 ENTRY(_entry_point)
 
@@ -196,11 +200,16 @@ SECTIONS
     /* __etext is (for backwards compatibility) the name of the .data init source pointer (...) */
     __etext = LOADADDR(.data);
 
+    /* NOLOAD + explicit `AT> RAM` so the section's LMA stays in RAM rather
+       than inheriting a flash LMA from the preceding section. Without this,
+       objcopy's segment layout check (in the post-build CRC step) collides
+       with .flash_end once any object actually lands in this section
+       (e.g. boot_crumb_data). */
     .uninitialized_data (NOLOAD): {
         . = ALIGN(4);
         __udata_end__ = .;
         *(.uninitialized_data*)
-    } > RAM
+    } > RAM AT> RAM
 
     /* Start and end symbols must be word-aligned */
     .scratch_x : {
@@ -210,6 +219,13 @@ SECTIONS
         __scratch_x_end__ = .;
     } > SCRATCH_X AT > FLASH
     __scratch_x_source__ = LOADADDR(.scratch_x);
+
+    /* See rp2350 variant for the design notes on this NOLOAD scratch_x
+       subsection (debug crumbs that must survive BOOTSEL transitions). */
+    .scratch_x_noinit (NOLOAD): {
+        . = ALIGN(4);
+        *(.scratch_x_noinit*)
+    } > SCRATCH_X AT> SCRATCH_X
 
     .scratch_y : {
         __scratch_y_start__ = .;

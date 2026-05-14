@@ -226,41 +226,52 @@ static void configure_rx_dma(device_t *state) {
 int board;
 
 void initial_setup(device_t *state) {
+    boot_crumb_set_phase(PHASE_ENTER_INITIAL_SETUP);
+
+    /* DEBUG: enable watchdog at the very top of init with an 8 s timeout.
+       Without this, a hang during init (before the production watchdog_enable
+       at the end of this function) leaves the chip stuck forever — the user
+       has to power-cycle, which wipes SRAM and destroys the boot crumbs.
+       Enabling early means a hang triggers a watchdog reboot, SRAM survives,
+       and the auto-BOOTSEL handler at the top of main() catches it. Each
+       phase below kicks the watchdog so the 8 s window resets every step.
+       The matching watchdog_enable at the end of initial_setup just resets
+       the timer to the production 500 ms value. REVERT BOTH ONCE THE
+       INTERMITTENT CRASH IS ROOT-CAUSED. */
+    watchdog_enable(8000, WATCHDOG_PAUSE_ON_DEBUG);
+
     /* PIO USB requires a clock multiple of 12 MHz, setting to 120 MHz */
     set_sys_clock_khz(120000, true);
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_SET_SYS_CLOCK);
 
     /* Search the persistent storage sector in flash for valid config or use defaults */
     load_config(state);
-
-#ifdef CYW43_WL_GPIO_LED_PIN
-    /* Initialise the CYW43439 wireless module. Must run before deskhop_led_init()
-       because on these boards the on-board LED is a virtual GPIO inside the
-       wireless module. The `poll` cyw43_arch variant is used (see CMakeLists);
-       it requires periodic cyw43_arch_poll() calls — handled by cyw43_poll_task
-       in src/tasks.c. */
-    if (cyw43_arch_init() != 0) {
-        /* If radio init fails there's nothing useful we can do — sit on it so
-           the watchdog reboots us, rather than running with a half-up device. */
-        while (1) tight_loop_contents();
-    }
-#endif
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_LOAD_CONFIG);
 
     /* Initialise the on-board LED (platform-specific — direct GPIO on the
-       original Pico, CYW43 virtual GPIO on Pi Pico W / 2 W). On Pico W / 2 W
-       this also primes the cyw43 PIO SPI path: without an early "warm" cyw43
-       call, the first gpio_put after watchdog_enable can take long enough
-       to do its lazy SPI setup that the 500 ms watchdog fires and reboots
-       the chip mid-init. Confirmed by bisect on real Pico 2 W hardware. */
+       original Pico, CYW43 virtual GPIO on Pi Pico W / 2 W). On the CYW43
+       boards this is a no-op; the virtual GPIO is brought up by
+       cyw43_arch_init(), called later in this function. */
     deskhop_led_init();
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_LED_INIT);
 
     /* Check if we should boot in configuration mode or not */
     state->config_mode_active = is_config_mode_active(state);
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_CONFIG_MODE_CHECK);
 
     /* Detect which board we're running on */
     state->board_role = board_autoprobe();
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_BOARD_AUTOPROBE);
 
     /* Initialize and configure UART */
     serial_init();
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_SERIAL_INIT);
 
     /* Initialize keyboard and mouse queues */
     queue_init(&state->kbd_queue, sizeof(hid_keyboard_report_t), KBD_QUEUE_LENGTH);
@@ -271,20 +282,57 @@ void initial_setup(device_t *state) {
 
     /* Initialize UART queue */
     queue_init(&state->uart_tx_queue, sizeof(uart_packet_t), UART_QUEUE_LENGTH);
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_QUEUES);
 
     /* Setup RP2040 Core 1 */
+    boot_crumb_set_phase(PHASE_BEFORE_CORE1_LAUNCH);
     multicore_reset_core1();
     multicore_launch_core1(core1_main);
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_CORE1_LAUNCH);
 
-    /* Initialize and configure TinyUSB Device */
+    /* Initialize and configure TinyUSB Device. Must run before cyw43_arch_init()
+       on Pico 2 W — see comment below for the enumeration-window rationale. */
+    boot_crumb_set_phase(PHASE_BEFORE_TUD_INIT);
     tud_init(BOARD_TUD_RHPORT);
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_TUD_INIT);
 
     /* Initialize and configure TinyUSB Host */
+    boot_crumb_set_phase(PHASE_BEFORE_TUH_INIT);
     pio_usb_host_config(state);
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_TUH_INIT);
 
     /* Initialize and configure DMA */
     configure_tx_dma(state);
     configure_rx_dma(state);
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_DMA);
+
+#ifdef CYW43_WL_GPIO_LED_PIN
+    /* Initialise the CYW43439 wireless module — deferred to here on purpose.
+       cyw43_arch_init() blocks the CPU for hundreds of ms loading the radio
+       firmware blob over SPI. If it runs before tud_init(), the host PC's
+       USB enumeration window expires while we're stuck in firmware load and
+       the device never appears. Running it after tud_init+tuh_init means
+       enumeration starts on time and the radio comes up after.
+       (Pattern borrowed from joypad-os bt2gc app — same RP2350 + CYW43
+       constraint.) The `poll` cyw43_arch variant is used (see CMakeLists);
+       it requires periodic cyw43_arch_poll() calls — handled by
+       cyw43_poll_task in src/tasks.c. */
+    boot_crumb_set_phase(PHASE_BEFORE_CYW43_INIT);
+    int cyw_rc = cyw43_arch_init();
+    watchdog_update();
+    boot_crumb_set_detail((uint32_t)cyw_rc);
+    if (cyw_rc != 0) {
+        /* If radio init fails there's nothing useful we can do — sit on it so
+           the watchdog reboots us, rather than running with a half-up device. */
+        while (1) tight_loop_contents();
+    }
+    boot_crumb_set_phase(PHASE_AFTER_CYW43_INIT);
+#endif
 
     /* Load the current firmware info */
     state->_running_fw = _firmware_metadata;
@@ -292,10 +340,17 @@ void initial_setup(device_t *state) {
     /* Update the core1 initial pass timestamp before enabling the watchdog */
     state->core1_last_loop_pass = time_us_64();
 
-    /* DIAGNOSTIC: long watchdog timeout (8 seconds, max for rp2350) to test
-       whether the production hang is a timing issue around the first
-       cyw43 gpio_put + first kick_watchdog_task firing. */
+    /* DEBUG: keep the 8 s diagnostic timeout from the top of this function
+       instead of dropping to production WATCHDOG_TIMEOUT (500 ms). Crumb
+       evidence shows the firmware hanging at PHASE_BEFORE_SET_ACTIVE; the
+       likely cause is that cyw43_do_ioctl's own 500 ms internal timeout
+       (CYW43_IOCTL_TIMEOUT_US) collides with the 500 ms watchdog — both
+       fire at the same instant, watchdog wins. 8 s here lets cyw43_do_ioctl
+       time out and return so we can observe whether execution proceeds to
+       PHASE_AFTER_SET_ACTIVE (0x16). Revert once root-caused. */
+    boot_crumb_set_phase(PHASE_BEFORE_WATCHDOG_ENABLE);
     watchdog_enable(8000, WATCHDOG_PAUSE_ON_DEBUG);
+    boot_crumb_set_phase(PHASE_AFTER_WATCHDOG_ENABLE);
 }
 
 /* ==========  End of Initial Board Setup  ========== */
