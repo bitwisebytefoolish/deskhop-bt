@@ -22,6 +22,7 @@
 #include "classic/hid_host.h"
 
 #include "bt_hid_host.h"
+#include "boot_crumb.h"
 
 /* Forward-declare without pulling in cyw43.h (which conflicts with BTstack
  * and TinyUSB types).  cyw43_bluetooth_hci_init downloads the BT firmware
@@ -94,8 +95,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
 
     switch (event_type) {
         case BTSTACK_EVENT_STATE:
-            if (btstack_event_state_get_state(packet) == HCI_STATE_WORKING)
+            if (btstack_event_state_get_state(packet) == HCI_STATE_WORKING) {
                 start_inquiry();
+            }
             break;
 
         case HCI_EVENT_INQUIRY_RESULT:
@@ -211,6 +213,7 @@ void bt_hid_host_init(bt_hid_state_t *bt_state) {
      * (via cyw43_arch_poll.c when CYW43_ENABLE_BLUETOOTH is set).
      * Start directly at the Classic BT stack layers. */
     l2cap_init();
+    boot_crumb_set_phase(PHASE_BT_HID_L2CAP_DONE);
 
     /* Just-works SSP pairing — no PIN, no confirmation UI needed.
      * Classic BT SSP is handled automatically when ENABLE_SSP is defined
@@ -220,6 +223,7 @@ void bt_hid_host_init(bt_hid_state_t *bt_state) {
     /* HID host protocol layer */
     hid_host_init(hid_descriptor_storage, sizeof(hid_descriptor_storage));
     hid_host_register_packet_handler(packet_handler);
+    boot_crumb_set_phase(PHASE_BT_HID_HOST_INIT_DONE);
 
     /* Pre-download BT firmware before entering hci_power_control.
      *
@@ -230,6 +234,7 @@ void bt_hid_host_init(bt_hid_state_t *bt_state) {
      * bt_loaded is true, cyw43_ensure_bt_up skips the download on the
      * second call from inside hci_transport_cyw43_open. */
     cyw43_bluetooth_hci_init();
+    boot_crumb_set_phase(PHASE_BT_HID_FW_PRELOAD_DONE);
 
     /* Power on the radio — BTstack will call back via packet_handler as
      * HCI_STATE_WORKING when the controller is ready. */
