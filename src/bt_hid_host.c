@@ -23,6 +23,11 @@
 
 #include "bt_hid_host.h"
 
+/* Forward-declare without pulling in cyw43.h (which conflicts with BTstack
+ * and TinyUSB types).  cyw43_bluetooth_hci_init downloads the BT firmware
+ * blob to the CYW43439 and sets cyw43_state.bt_loaded = true. */
+extern int cyw43_bluetooth_hci_init(void);
+
 /* 1 KB is enough for a keyboard's HID report descriptor. */
 #define HID_DESCRIPTOR_STORAGE_LEN 1024
 
@@ -101,6 +106,16 @@ void bt_hid_host_init(bt_hid_state_t *bt_state) {
     /* HID host protocol layer */
     hid_host_init(hid_descriptor_storage, sizeof(hid_descriptor_storage));
     hid_host_register_packet_handler(packet_handler);
+
+    /* Pre-download BT firmware before entering hci_power_control.
+     *
+     * hci_power_control → hci_power_control_on → hci_transport_cyw43_open
+     * → cyw43_bluetooth_hci_init → cyw43_ensure_bt_up → cyw43_btbus_init is
+     * a deep call chain that overflows the 2 KB core0 (SCRATCH_Y) stack.
+     * Calling cyw43_bluetooth_hci_init here uses a shallower frame; once
+     * bt_loaded is true, cyw43_ensure_bt_up skips the download on the
+     * second call from inside hci_transport_cyw43_open. */
+    cyw43_bluetooth_hci_init();
 
     /* Power on the radio — BTstack will call back via packet_handler as
      * HCI_STATE_WORKING when the controller is ready. */
