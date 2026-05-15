@@ -16,6 +16,9 @@
 #endif
 
 void task_scheduler(device_t *state, task_t *task) {
+    if (!task->exec)
+        return;
+
     uint64_t current_time = time_us_64();
 
     if (current_time < task->next_run)

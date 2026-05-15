@@ -267,8 +267,11 @@ void initial_setup(device_t *state) {
        on Pico 2 W — see comment below for the enumeration-window rationale. */
     tud_init(BOARD_TUD_RHPORT);
 
-    /* Initialize and configure TinyUSB Host */
+    /* Initialize and configure TinyUSB Host — disabled on board A when the
+     * BTstack BT HID host replaces the wired-USB keyboard socket. */
+#ifndef DH_BT_HID_HOST_KBD
     pio_usb_host_config(state);
+#endif
 
     /* Initialize and configure DMA */
     configure_tx_dma(state);

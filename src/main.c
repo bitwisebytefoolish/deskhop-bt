@@ -55,7 +55,12 @@ int main(void) {
 
 void core1_main() {
     static task_t tasks_core1[] = {
+        /* Slot 0: USB host task — disabled on board A when DH_BT_HID_HOST_KBD
+         * replaces the wired-USB keyboard socket with BTstack.  task_scheduler
+         * skips entries with exec == NULL so the zeroed slot is harmless. */
+#ifndef DH_BT_HID_HOST_KBD
         [0] = {.exec = &usb_host_task,           .frequency = _TOP()},       // .-> USB host task, needs to run as often as possible
+#endif
         [1] = {.exec = &packet_receiver_task,    .frequency = _TOP()},       // | Receive data over serial from the other board
         [2] = {.exec = &led_blinking_task,       .frequency = _HZ(30)},      // | Check if LED needs blinking
         [3] = {.exec = &screensaver_task,        .frequency = _HZ(120)},     // | Handle "screensaver" movements
