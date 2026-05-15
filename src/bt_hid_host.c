@@ -67,10 +67,12 @@ static void start_inquiry(void) {
 
 static void connect_to_keyboard(void) {
     g_state = BT_STATE_CONNECTING;
+    boot_crumb_set_detail(0xBB020000u);
     uint8_t status = hid_host_connect(g_keyboard_addr,
                                       HID_PROTOCOL_MODE_REPORT,
                                       &g_hid_cid);
     if (status != ERROR_CODE_SUCCESS) {
+        boot_crumb_set_detail(0xBB02FF00u | status);
         g_state = BT_STATE_IDLE;
         start_inquiry();
     }
@@ -97,9 +99,6 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
 
         case HCI_EVENT_INQUIRY_RESULT:
         case HCI_EVENT_INQUIRY_RESULT_WITH_RSSI: {
-            if (g_keyboard_found)
-                break;
-
             bd_addr_t addr;
             uint32_t  cod;
 
@@ -110,6 +109,13 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
                 hci_event_inquiry_result_with_rssi_get_bd_addr(packet, addr);
                 cod = hci_event_inquiry_result_with_rssi_get_class_of_device(packet);
             }
+
+            /* Record every inquiry result in DETAIL for post-mortem.
+             * Encoding: 0xBB01CCCC where CCCC = low 16 bits of CoD. */
+            boot_crumb_set_detail(0xBB010000u | (cod & 0xFFFFu));
+
+            if (g_keyboard_found)
+                break;
 
             bool is_peripheral = (cod & COD_MAJOR_MASK) == COD_MAJOR_PERIPHERAL;
             bool has_keyboard  = (cod & COD_MINOR_MASK) & COD_MINOR_KEYBOARD;
@@ -129,6 +135,24 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
                 start_inquiry(); /* nothing found — sweep again */
             break;
 
+        /* SSP just-works: auto-confirm numeric comparison without user input. */
+        case HCI_EVENT_USER_CONFIRMATION_REQUEST: {
+            boot_crumb_set_detail(0xBB050000u);
+            bd_addr_t ssp_addr;
+            hci_event_user_confirmation_request_get_bd_addr(packet, ssp_addr);
+            gap_ssp_confirmation_response(ssp_addr);
+            break;
+        }
+
+        /* Legacy PIN pairing: reply with "0000" so older keyboards can pair. */
+        case HCI_EVENT_PIN_CODE_REQUEST: {
+            boot_crumb_set_detail(0xBB040000u);
+            bd_addr_t pin_addr;
+            hci_event_pin_code_request_get_bd_addr(packet, pin_addr);
+            gap_pin_code_response(pin_addr, "0000");
+            break;
+        }
+
         case HCI_EVENT_HID_META:
             switch (hci_event_hid_meta_get_subevent_code(packet)) {
                 case HID_SUBEVENT_INCOMING_CONNECTION:
@@ -141,6 +165,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
                 case HID_SUBEVENT_CONNECTION_OPENED: {
                     uint8_t status = hid_subevent_connection_opened_get_status(packet);
                     if (status != ERROR_CODE_SUCCESS) {
+                        boot_crumb_set_detail(0xBB03FF00u | status);
                         g_state = BT_STATE_IDLE;
                         start_inquiry();
                         break;
@@ -149,6 +174,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
                     g_state               = BT_STATE_CONNECTED;
                     g_descriptor_valid    = false;
                     *g_bt->keyboard_connected = true;
+                    boot_crumb_set_detail(0xBB030000u);
                     break;
                 }
 
