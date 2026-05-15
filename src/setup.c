@@ -298,9 +298,21 @@ void initial_setup(device_t *state) {
     /* BTstack HID host init — must follow cyw43_arch_init() since it binds
        the run-loop to the cyw43 async-context.  Must precede watchdog_enable()
        since btstack_cyw43_init() may take up to a few ms.
-       bt_hid_state is declared static so it outlives this function. */
-    static bt_hid_state_t bt_hid_state;
+       Both statics outlive this function (no stack aliasing risk). */
+    static bt_hid_state_t  bt_hid_state;
+    static hid_interface_t bt_kbd_iface;
+
     bt_hid_state.keyboard_connected = &state->keyboard_connected;
+    bt_hid_state.kbd_iface          = &bt_kbd_iface;
+    bt_hid_state.kbd_itf            = 0;
+    bt_hid_state.parse_descriptor   = parse_report_descriptor;
+    bt_hid_state.process_report     = process_keyboard_report;
+
+    /* BT keyboards always connect in report mode (protocol = 1).
+     * parse_report_descriptor does not set this field, so we pre-populate
+     * it so extract_kbd_data routes correctly before the descriptor arrives. */
+    bt_kbd_iface.protocol = 1; /* HID_PROTOCOL_REPORT */
+
     bt_hid_host_init(&bt_hid_state);
 #endif
 #endif
