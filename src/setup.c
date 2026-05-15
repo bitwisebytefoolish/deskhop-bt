@@ -324,7 +324,9 @@ void initial_setup(device_t *state) {
        periodic cyw43_arch_poll() calls — handled by cyw43_poll_task in
        src/tasks.c. */
     boot_crumb_set_phase(PHASE_BEFORE_CYW43_INIT);
+    boot_crumb_set_detail(0xC9430001u); /* about to call cyw43_arch_init */
     int cyw_rc = cyw43_arch_init();
+    boot_crumb_set_detail(0xC9430002u); /* returned from cyw43_arch_init */
     watchdog_update();
     if (cyw_rc != 0) {
         /* If radio init fails there's nothing useful we can do — sit on it so

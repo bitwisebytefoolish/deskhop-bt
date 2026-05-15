@@ -11,6 +11,15 @@
 #include "main.h"
 #include "boot_crumb.h"
 
+/* Override the SDK's weak isr_hardfault (bkpt → LOCKUP) so we can stamp
+ * a crumb before the watchdog fires.  Must NOT be naked — we need the
+ * compiler to emit a proper stack frame so boot_crumb_set_phase works. */
+void isr_hardfault(void) {
+    boot_crumb_data[BOOT_CRUMB_SLOT_PHASE]  = 0xFFu;
+    boot_crumb_data[BOOT_CRUMB_SLOT_DETAIL] = 0xDEADF001u;
+    while (1) tight_loop_contents();
+}
+
 /*********  Global Variables  **********/
 device_t global_state     = {0};
 device_t *device          = &global_state;
@@ -73,6 +82,10 @@ int main(void) {
 }
 
 void core1_main() {
+    /* Required so flash_safe_execute() on core0 can coordinate flash writes
+     * (e.g. BTstack TLV bank erase/program) without hanging forever. */
+    multicore_lockout_victim_init();
+
     static task_t tasks_core1[] = {
         /* Slot 0: USB host task — disabled on board A when DH_BT_HID_HOST_KBD
          * replaces the wired-USB keyboard socket with BTstack.  task_scheduler

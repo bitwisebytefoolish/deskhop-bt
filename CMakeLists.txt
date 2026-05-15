@@ -193,6 +193,12 @@ target_compile_definitions(${binary}
     # BT HID host keyboard flag — propagated to source so #ifdef guards work.
     $<$<BOOL:${DH_BT_HID_HOST_KBD}>:DH_BT_HID_HOST_KBD>
     __disk_file_path__="${DISK_BIN}"
+    # Double core0 stack (SCRATCH_Y) from 2KB to 4KB.  cyw43_arch_init +
+    # BTstack init have a deeper frame chain than the default 2KB accommodates.
+    # SCRATCH_Y is 4KB and contains nothing else, so this costs nothing.
+    # PICO_CORE1_STACK_SIZE stays at 2KB (SCRATCH_X has 64 B of boot_crumb_data).
+    PICO_STACK_SIZE=0x1000
+    PICO_CORE1_STACK_SIZE=0x800
 )
 
 ## Support building a debug version
