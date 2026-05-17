@@ -2,3 +2,9 @@ build
 build-*
 
 .idea/
+
+# macOS Finder metadata
+.DS_Store
+
+# Transient diagnostic dumps (boot-crumb snapshots etc.)
+*.bin

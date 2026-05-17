@@ -351,11 +351,20 @@ void initial_setup(device_t *state) {
     bt_hid_state.kbd_itf            = 0;
     bt_hid_state.parse_descriptor   = parse_report_descriptor;
     bt_hid_state.process_report     = process_keyboard_report;
+    bt_hid_state.blinks_left        = &state->blinks_left;
+    bt_hid_state.last_led_change    = &state->last_led_change;
+    bt_hid_state.onboard_led_state  = &state->onboard_led_state;
+    bt_hid_state.onboard_led_dirty  = &state->onboard_led_dirty;
 
-    /* BT keyboards always connect in report mode (protocol = 1).
-     * parse_report_descriptor does not set this field, so we pre-populate
-     * it so extract_kbd_data routes correctly before the descriptor arrives. */
-    bt_kbd_iface.protocol = 1; /* HID_PROTOCOL_REPORT */
+    /* Pre-populate iface->protocol = 0 (HID_PROTOCOL_BOOT) so
+     * extract_kbd_data dispatches to _extract_kbd_boot, the fixed-format
+     * 8-byte parser that doesn't depend on parse_report_descriptor having
+     * correctly populated kb->key_array etc.  bt_hid_host.c also asks
+     * BTstack to negotiate HID_PROTOCOL_MODE_BOOT with the keyboard so
+     * the keyboard actually sends boot-format reports.  Avoid switching
+     * to REPORT mode until process_keyboard_report's descriptor-based
+     * path is verified working for the BT path (#8 in the phase plan). */
+    bt_kbd_iface.protocol = 0; /* HID_PROTOCOL_BOOT */
 
     bt_hid_host_init(&bt_hid_state);
     watchdog_update();

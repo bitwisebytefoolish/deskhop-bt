@@ -11,6 +11,14 @@
 
 #include "main.h"
 
+#ifdef DH_BT_HID_HOST_KBD
+/* While the BT debug indicator (bt_hid_host.c stage_tick) is driving the
+ * on-board LED, gate every other LED writer in this file so they don't
+ * race.  Set by bt_hid_host's set_stage() the first time it leaves IDLE.
+ * No header-include needed — this is just a one-line cross-module flag. */
+extern volatile bool bt_hid_host_owns_led;
+#endif
+
 /* ==================================================== *
  * ========== Platform-specific LED I/O       ========== *
  * ==================================================== *
@@ -83,6 +91,11 @@ void set_keyboard_leds(uint8_t requested_led_state, device_t *state) {
 }
 
 void restore_leds(device_t *state) {
+#ifdef DH_BT_HID_HOST_KBD
+    /* Defer to bt_hid_host's stage indicator while it's driving the LED. */
+    if (bt_hid_host_owns_led)
+        return;
+#endif
     /* Light up on-board LED if current board is active output. Only flag
        the change as dirty; the actual cyw43 write happens on core0 in
        led_apply_task. The RP2040 (non-CYW43) path picks up the dirty
@@ -113,6 +126,14 @@ uint8_t toggle_led(device_t *state) {
 }
 
 void blink_led(device_t *state) {
+#ifdef DH_BT_HID_HOST_KBD
+    /* Defer to bt_hid_host's stage indicator while it's driving the LED.
+     * Without this, e.g. handle_flash_led_msg from peer-board UART pings
+     * sets blinks_left=5 → wakes led_blinking_task → starts toggling the
+     * LED on top of our pattern → user sees corrupted flash counts. */
+    if (bt_hid_host_owns_led)
+        return;
+#endif
     /* Since LEDs might be ON previously, we go OFF, ON, OFF, ON, OFF.
        Safe on CYW43 boards now that toggle_led no longer touches cyw43
        directly — led_apply_task on core0 issues the actual writes. */

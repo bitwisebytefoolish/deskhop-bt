@@ -37,6 +37,21 @@
 #define MAX_NR_RFCOMM_SERVICES        0
 #define MAX_NR_RFCOMM_CHANNELS        0
 
+/* HID host connection pool.  hid_host_connect() does
+ *   connection = hid_host_create_connection(remote_addr);
+ *   if (!connection) return BTSTACK_MEMORY_ALLOC_FAILED;  (= 0x56 = 86)
+ * which pulls from a static array of size MAX_NR_HID_HOST_CONNECTIONS in
+ * btstack_memory.c.  If undefined, the default is 0 — the pool is empty,
+ * every connect attempt returns 0x56.  THIS was the silent failure that
+ * caused every pairing attempt to fail synchronously.
+ *
+ * Sized at 2 (not 1) to tolerate transient overlap: when the BT link
+ * drops and our CONNECTION_CLOSED handler immediately restarts inquiry
+ * and re-issues hid_host_connect, BTstack may not yet have freed the
+ * outgoing connection slot.  A pool of 1 would then return 0x56; a pool
+ * of 2 lets the new connect proceed without waiting for cleanup.       */
+#define MAX_NR_HID_HOST_CONNECTIONS   2
+
 /* ---- Bond storage (TLV via pico_btstack_flash_bank) --------------- */
 
 #define NVM_NUM_LINK_KEYS             1

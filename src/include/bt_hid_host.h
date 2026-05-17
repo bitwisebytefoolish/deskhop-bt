@@ -40,6 +40,23 @@ typedef struct {
      * Signature matches process_keyboard_report() in keyboard.h. */
     void (*process_report)(uint8_t *raw, int len, uint8_t itf,
                            struct hid_interface_t *iface);
+
+    /* ---- LED feedback plumbing -------------------------------------- *
+     * The BT stage indicator (bt_hid_host_stage_tick) drives the on-board
+     * LED *directly* via these pointers — bypassing the blink_n /
+     * restore_leds machinery in led.c, which can't give us a deterministic
+     * LED-off background between flash sequences (there's a race between
+     * led_blinking_task on core1 calling restore_leds and our stage_tick
+     * on core0 overriding it).  Keeping blinks_left = 0 throughout means
+     * led_blinking_task stays dormant and there's no contention.
+     *
+     * The blinks_left / last_led_change pointers are vestigial after the
+     * sticky-stage redesign but kept for back-compat (other callers may
+     * still use blink_led(state) for unrelated patterns). */
+    int32_t      *blinks_left;        /* device_t.blinks_left (unused now) */
+    int32_t      *last_led_change;    /* device_t.last_led_change (unused) */
+    bool         *onboard_led_state;  /* device_t.onboard_led_state */
+    volatile bool *onboard_led_dirty; /* device_t.onboard_led_dirty */
 } bt_hid_state_t;
 
 /* Initialise the BTstack Classic HID host on board A (keyboard socket).
@@ -57,5 +74,11 @@ typedef struct {
  * The BTstack run-loop is driven by cyw43_poll_task() on core0 — no
  * additional calls are needed after bt_hid_host_init() returns. */
 void bt_hid_host_init(bt_hid_state_t *bt_state);
+
+/* Sticky-stage LED driver.  Call from the core0 task scheduler at ~30 Hz.
+ * Continuously loops the on-board LED through the current BT stage's
+ * flash count with a 1 s pause between repetitions, so the user can read
+ * the latest stage at any time instead of catching a momentary blink. */
+void bt_hid_host_stage_tick(void);
 
 #endif /* DH_BT_HID_HOST_KBD */

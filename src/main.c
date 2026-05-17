@@ -48,9 +48,19 @@ int main(void) {
         [4] = {.exec = &process_hid_queue_task,   .frequency = _HZ(1000)},   // | Check if there are any packets to send over vendor link
         [5] = {.exec = &process_uart_tx_task,     .frequency = _TOP()},      // | Check if there are any packets to send over UART
         [6] = {.exec = &led_apply_task,           .frequency = _HZ(100)},    // | Apply pending onboard-LED changes (drains state->onboard_led_dirty; cyw43_arch_gpio_put on Pico 2 W, gpio_put on Pico)
-#ifdef CYW43_WL_GPIO_LED_PIN
-        [7] = {.exec = &cyw43_poll_task,          .frequency = _TOP()},      // | Pump cyw43 / BTstack event loop (poll variant) — Pico W / 2 W only
+#ifdef DH_BT_HID_HOST_KBD
+        [7] = {.exec = &bt_hid_stage_tick_task,   .frequency = _HZ(100)},    // | Drive the sticky BT-stage LED indicator (continuous "N flashes, pause" pattern). 100 Hz matches led_apply_task so phase boundaries land within ~10 ms of their nominal time.
 #endif
+#ifdef CYW43_WL_GPIO_LED_PIN
+        [8] = {.exec = &cyw43_poll_task,          .frequency = _TOP()},      // | Pump cyw43 / BTstack event loop (poll variant) — Pico W / 2 W only
+#endif
+        /* Note: runtime BOOTSEL-button polling intentionally NOT added here.
+           is_bootsel_pressed() floats QSPI CS for 20 µs with IRQs disabled;
+           the calling code must live in RAM (__no_inline_not_in_flash_func)
+           or the CPU will stall on the next I-cache miss while CS is dark.
+           Earlier attempt with bootsel_poll_task hung core0 in <100 ms,
+           tripping the 3 s watchdog every boot.  For reflash, hold BOOTSEL
+           while replugging USB — hardware path, no firmware needed.       */
     };                                                                       // `----- then go back and repeat forever
     const int NUM_TASKS = ARRAY_SIZE(tasks_core0);
 

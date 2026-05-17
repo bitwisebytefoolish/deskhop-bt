@@ -11,6 +11,10 @@
 
 #include "main.h"
 
+#ifdef DH_BT_HID_HOST_KBD
+#include "bt_hid_host.h"
+#endif
+
 #ifdef CYW43_WL_GPIO_LED_PIN
 #include "pico/cyw43_arch.h"
 #endif
@@ -78,6 +82,29 @@ void cyw43_poll_task(device_t *state) {
     cyw43_arch_poll();
 }
 #endif
+
+#ifdef DH_BT_HID_HOST_KBD
+/* Thin wrapper so the task scheduler (which always passes device_t *)
+ * can drive bt_hid_host_stage_tick().  The tick paints the current BT
+ * stage onto the on-board LED as a repeating flash pattern — see the
+ * sticky-stage comment in bt_hid_host.c. */
+void bt_hid_stage_tick_task(device_t *state) {
+    (void)state;
+    bt_hid_host_stage_tick();
+}
+#endif
+
+/* NB: a runtime BOOTSEL-button-poll task was deliberately removed.
+   is_bootsel_pressed() (in utils.c) floats QSPI CS for 20 µs with
+   interrupts disabled.  Unless the calling function lives in RAM
+   (__no_inline_not_in_flash_func), the CPU stalls on the very next
+   I-cache miss because CS is dark.  An earlier bootsel_poll_task
+   here hung core0 within ~100 ms every boot, tripping the watchdog.
+
+   For developer reflash: hold BOOTSEL while replugging USB — works at
+   hardware-bootrom level, no firmware help needed.  For diagnostics:
+   the crumb-on-watchdog path in boot_crumb.c reliably captures
+   PHASE / DETAIL / CORE0_TASK after any watchdog-triggered reboot. */
 
 mouse_report_t *screensaver_pong(device_t *state) {
     static mouse_report_t report = {0};
