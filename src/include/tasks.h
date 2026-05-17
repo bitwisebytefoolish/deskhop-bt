@@ -35,6 +35,10 @@ void screensaver_task(device_t *);
 void usb_device_task(device_t *);
 void usb_host_task(device_t *);
 
+#ifdef DH_BT_HID_HOST_KBD
+void bt_hid_stage_tick_task(device_t *);
+#endif
+
 #ifdef CYW43_WL_GPIO_LED_PIN
 void cyw43_poll_task(device_t *);
 /* The cyw43_arch poll variant is single-thread. All cyw43_arch_* calls

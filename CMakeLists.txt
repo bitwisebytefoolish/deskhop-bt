@@ -96,6 +96,7 @@ set(COMMON_SOURCES
   ${SRC_DIR}/usb.c
   ${SRC_DIR}/main.c
   ${SRC_DIR}/ramdisk.c
+  ${SRC_DIR}/boot_crumb.c
   ${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/dcd_pio_usb.c
   ${PICO_TINYUSB_PATH}/src/portable/raspberrypi/pio_usb/hcd_pio_usb.c
 )
@@ -137,10 +138,30 @@ set(COMMON_LINK_LIBRARIES
 ## src/tasks.c. (See https://github.com/phieri/viking-bio-matter/pull/75
 ## for the same finding from another project.)
 ##
-## BTstack itself is not linked here — that comes with the hid_host work
-## (#6 keyboard, #9 mouse).
+## BTstack HID host (issue #6): enabled by default on CYW43 builds.
+## Override with -DDH_BT_HID_HOST_KBD=0 to disable (e.g. for a minimal
+## cyw43-LED-only build). Issue #9 (mouse) will add DH_BT_HID_HOST_MOUSE
+## as an orthogonal flag following the same pattern.
 if(PICO_CYW43_SUPPORTED)
     list(APPEND COMMON_LINK_LIBRARIES pico_cyw43_arch_poll)
+
+    if(NOT DEFINED DH_BT_HID_HOST_KBD)
+        set(DH_BT_HID_HOST_KBD 1)
+    endif()
+
+    if(DH_BT_HID_HOST_KBD)
+        ## pico_btstack_cyw43: one-stop Pico W glue — wires run-loop to the
+        ## cyw43_arch async-context, inits the HCI transport, and sets up TLV
+        ## flash storage. Pulls in pico_btstack_base, pico_btstack_flash_bank,
+        ## pico_btstack_run_loop_async_context, and pico_btstack_hci_transport_cyw43.
+        ## pico_btstack_classic adds hid_host.c, l2cap, sdp, and ssp on top.
+        list(APPEND COMMON_LINK_LIBRARIES
+            pico_btstack_cyw43
+            pico_btstack_classic
+        )
+        ## btstack_config.h is in src/include/bt/ so BTstack finds it.
+        list(APPEND COMMON_INCLUDES ${CMAKE_SOURCE_DIR}/src/include/bt)
+    endif()
 endif()
 set(binary deskhop)
 
@@ -156,6 +177,9 @@ set_property(SOURCE ${DISK_ASM} APPEND PROPERTY COMPILE_OPTIONS "-x" "assembler-
 add_executable(${binary} ${DISK_ASM})
 
 target_sources(${binary} PUBLIC ${COMMON_SOURCES})
+if(DH_BT_HID_HOST_KBD)
+    target_sources(${binary} PRIVATE ${SRC_DIR}/bt_hid_host.c)
+endif()
 target_compile_definitions(${binary}
     PRIVATE
     VERSION_MAJOR=${VERSION_MAJOR}
@@ -166,7 +190,15 @@ target_compile_definitions(${binary}
     # Setting CYW43_LWIP=0 keeps cyw43.h from pulling in lwip/netif.h,
     # which we don't ship lwipopts.h for. Revisit if we ever need Wi-Fi.
     $<$<BOOL:${PICO_CYW43_SUPPORTED}>:CYW43_LWIP=0>
+    # BT HID host keyboard flag — propagated to source so #ifdef guards work.
+    $<$<BOOL:${DH_BT_HID_HOST_KBD}>:DH_BT_HID_HOST_KBD>
     __disk_file_path__="${DISK_BIN}"
+    # Double core0 stack (SCRATCH_Y) from 2KB to 4KB.  cyw43_arch_init +
+    # BTstack init have a deeper frame chain than the default 2KB accommodates.
+    # SCRATCH_Y is 4KB and contains nothing else, so this costs nothing.
+    # PICO_CORE1_STACK_SIZE stays at 2KB (SCRATCH_X has 64 B of boot_crumb_data).
+    PICO_STACK_SIZE=0x1000
+    PICO_CORE1_STACK_SIZE=0x800
 )
 
 ## Support building a debug version

@@ -14,12 +14,17 @@
  * ================================================== */
 
 #include "main.h"
+#include "boot_crumb.h"
 
 /* CYW43_WL_GPIO_LED_PIN is defined by the board header on boards that carry
    the CYW43439 module (Pico W, Pico 2 W). Same discriminator used in led.c.
    The C-level PICO_CYW43_SUPPORTED isn't a thing — it's a CMake-only var. */
 #ifdef CYW43_WL_GPIO_LED_PIN
 #include "pico/cyw43_arch.h"
+#endif
+
+#ifdef DH_BT_HID_HOST_KBD
+#include "bt_hid_host.h"
 #endif
 
 /* ================================================== *
@@ -224,26 +229,48 @@ static void configure_rx_dma(device_t *state) {
 int board;
 
 void initial_setup(device_t *state) {
+    boot_crumb_set_phase(PHASE_ENTER_INITIAL_SETUP);
+
+    /* Enable watchdog early with a generous 8 s timeout so any hang during
+       init triggers a watchdog reboot, SRAM survives, and the auto-BOOTSEL
+       handler at the top of main() catches it with the crumb intact.
+       Each step below kicks the watchdog so the 8 s window resets.
+       The matching watchdog_enable at the end resets the timer to the
+       production timeout. REVERT BOTH ONCE THE CRASH IS ROOT-CAUSED. */
+    watchdog_enable(8000, WATCHDOG_PAUSE_ON_DEBUG);
+
     /* PIO USB requires a clock multiple of 12 MHz, setting to 120 MHz */
     set_sys_clock_khz(120000, true);
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_SET_SYS_CLOCK);
 
     /* Search the persistent storage sector in flash for valid config or use defaults */
     load_config(state);
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_LOAD_CONFIG);
 
     /* Initialise the on-board LED (platform-specific — direct GPIO on the
        original Pico, CYW43 virtual GPIO on Pi Pico W / 2 W). On the CYW43
        boards this is a no-op; the virtual GPIO is brought up by
        cyw43_arch_init(), called later in this function. */
     deskhop_led_init();
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_LED_INIT);
 
     /* Check if we should boot in configuration mode or not */
     state->config_mode_active = is_config_mode_active(state);
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_CONFIG_MODE_CHECK);
 
     /* Detect which board we're running on */
     state->board_role = board_autoprobe();
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_BOARD_AUTOPROBE);
 
     /* Initialize and configure UART */
     serial_init();
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_SERIAL_INIT);
 
     /* Initialize keyboard and mouse queues */
     queue_init(&state->kbd_queue, sizeof(hid_keyboard_report_t), KBD_QUEUE_LENGTH);
@@ -254,21 +281,37 @@ void initial_setup(device_t *state) {
 
     /* Initialize UART queue */
     queue_init(&state->uart_tx_queue, sizeof(uart_packet_t), UART_QUEUE_LENGTH);
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_QUEUES);
 
     /* Setup RP2040 Core 1 */
+    boot_crumb_set_phase(PHASE_BEFORE_CORE1_LAUNCH);
     multicore_reset_core1();
     multicore_launch_core1(core1_main);
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_CORE1_LAUNCH);
 
     /* Initialize and configure TinyUSB Device. Must run before cyw43_arch_init()
        on Pico 2 W — see comment below for the enumeration-window rationale. */
+    boot_crumb_set_phase(PHASE_BEFORE_TUD_INIT);
     tud_init(BOARD_TUD_RHPORT);
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_TUD_INIT);
 
-    /* Initialize and configure TinyUSB Host */
+    /* Initialize and configure TinyUSB Host — disabled on board A when the
+     * BTstack BT HID host replaces the wired-USB keyboard socket. */
+#ifndef DH_BT_HID_HOST_KBD
+    boot_crumb_set_phase(PHASE_BEFORE_TUH_INIT);
     pio_usb_host_config(state);
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_TUH_INIT);
+#endif
 
     /* Initialize and configure DMA */
     configure_tx_dma(state);
     configure_rx_dma(state);
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_DMA);
 
 #ifdef CYW43_WL_GPIO_LED_PIN
     /* Initialise the CYW43439 wireless module — deferred to here on purpose.
@@ -280,12 +323,53 @@ void initial_setup(device_t *state) {
        The `poll` cyw43_arch variant is used (see CMakeLists); it requires
        periodic cyw43_arch_poll() calls — handled by cyw43_poll_task in
        src/tasks.c. */
+    boot_crumb_set_phase(PHASE_BEFORE_CYW43_INIT);
+    boot_crumb_set_detail(0xC9430001u); /* about to call cyw43_arch_init */
     int cyw_rc = cyw43_arch_init();
+    boot_crumb_set_detail(0xC9430002u); /* returned from cyw43_arch_init */
+    watchdog_update();
     if (cyw_rc != 0) {
         /* If radio init fails there's nothing useful we can do — sit on it so
-           the watchdog reboots us, rather than running with a half-up device. */
+           the watchdog reboots us, rather than running with a half-up device.
+           Stash cyw_rc into DETAIL so the dump reveals what went wrong. */
+        boot_crumb_set_detail(0xC9430000u | (uint32_t)((uint8_t)cyw_rc));
         while (1) tight_loop_contents();
     }
+    boot_crumb_set_phase(PHASE_AFTER_CYW43_INIT);
+
+#ifdef DH_BT_HID_HOST_KBD
+    /* BTstack HID host init — must follow cyw43_arch_init() since it binds
+       the run-loop to the cyw43 async-context.  Must precede watchdog_enable()
+       since btstack_cyw43_init() may take up to a few ms.
+       Both statics outlive this function (no stack aliasing risk). */
+    boot_crumb_set_phase(PHASE_BEFORE_BT_HID_INIT);
+    static bt_hid_state_t  bt_hid_state;
+    static hid_interface_t bt_kbd_iface;
+
+    bt_hid_state.keyboard_connected = &state->keyboard_connected;
+    bt_hid_state.kbd_iface          = &bt_kbd_iface;
+    bt_hid_state.kbd_itf            = 0;
+    bt_hid_state.parse_descriptor   = parse_report_descriptor;
+    bt_hid_state.process_report     = process_keyboard_report;
+    bt_hid_state.blinks_left        = &state->blinks_left;
+    bt_hid_state.last_led_change    = &state->last_led_change;
+    bt_hid_state.onboard_led_state  = &state->onboard_led_state;
+    bt_hid_state.onboard_led_dirty  = &state->onboard_led_dirty;
+
+    /* Pre-populate iface->protocol = 0 (HID_PROTOCOL_BOOT) so
+     * extract_kbd_data dispatches to _extract_kbd_boot, the fixed-format
+     * 8-byte parser that doesn't depend on parse_report_descriptor having
+     * correctly populated kb->key_array etc.  bt_hid_host.c also asks
+     * BTstack to negotiate HID_PROTOCOL_MODE_BOOT with the keyboard so
+     * the keyboard actually sends boot-format reports.  Avoid switching
+     * to REPORT mode until process_keyboard_report's descriptor-based
+     * path is verified working for the BT path (#8 in the phase plan). */
+    bt_kbd_iface.protocol = 0; /* HID_PROTOCOL_BOOT */
+
+    bt_hid_host_init(&bt_hid_state);
+    watchdog_update();
+    boot_crumb_set_phase(PHASE_AFTER_BT_HID_INIT);
+#endif
 #endif
 
     /* Load the current firmware info */
@@ -294,7 +378,9 @@ void initial_setup(device_t *state) {
     /* Update the core1 initial pass timestamp before enabling the watchdog */
     state->core1_last_loop_pass = time_us_64();
 
+    boot_crumb_set_phase(PHASE_BEFORE_WATCHDOG_ENABLE);
     watchdog_enable(WATCHDOG_TIMEOUT, WATCHDOG_PAUSE_ON_DEBUG);
+    boot_crumb_set_phase(PHASE_AFTER_WATCHDOG_ENABLE);
 }
 
 /* ==========  End of Initial Board Setup  ========== */

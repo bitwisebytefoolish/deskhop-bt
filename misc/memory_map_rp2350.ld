@@ -7,29 +7,40 @@
 
    Address layout (4 MB flash, 512 KB SRAM):
 
-     0x10000000 +---------------------+ FLASH (executable)              1 MB
+     0x10000000 +---------------------+ FLASH (executable)            1.5 MB
                 |                     |
-     0x10100000 +---------------------+ DISK_IMAGE (web-config FAT)    64 KB
-     0x10110000 +---------------------+ FW_METADATA (version + CRC)     4 KB
-     0x10111000 +---------------------+ FW_STAGING (OTA staging area)   1 MB
+     0x10180000 +---------------------+ DISK_IMAGE (web-config FAT)    64 KB
+     0x10190000 +---------------------+ FW_METADATA (version + CRC)     4 KB
+     0x10191000 +---------------------+ FW_STAGING (OTA staging area) 1.5 MB
                 |                     |
+     0x103FC000 +---------------------+ FLASH_CRUMB (boot diagnostics)  4 KB
+     0x103FD000 +---------------------+ FLASH_BTSTACK_BANK (BT bonds)   8 KB
      0x103FF000 +---------------------+ FLASH_CONFIG (persistent cfg)   4 KB
      0x10400000 +---------------------+ end of flash
 
-   The 1 MB executable region is ~12x the current 83 KB pico build. Of
-   that, ~240 KB is taken by the cyw43-driver firmware blob (.rodata) and
-   ~30-50 KB by cyw43_arch + driver. That leaves ~700 KB of headroom for
-   BTstack (typical Classic + BLE host footprint ~50-100 KB) and the
-   hid_host work scheduled for #6 / #9. STAGING matches FLASH size so a
-   full firmware replacement fits.
+   FLASH_BTSTACK_BANK reserves space for BTstack's TLV bond storage
+   (pico_btstack_flash_bank requires two FLASH_SECTOR_SIZE sectors).
+   It is declared (NOLOAD) so it never appears in the .uf2 image; the
+   pico_flash_bank library reads/writes this region at runtime via
+   PICO_FLASH_BANK_STORAGE_OFFSET (set in btstack_config.h to match the
+   `__FLASH_TOTAL_SIZE - __CONFIG_STORAGE_LEN - __BTSTACK_BANK_LEN`
+   offset below).
+
+   The 1.5 MB executable region gives ample headroom: the cyw43-driver
+   firmware blob takes ~240 KB (.rodata), cyw43_arch + driver ~50 KB,
+   BTstack Classic HID host ~80-120 KB, leaving ~1 MB for the deskhop
+   application itself.  STAGING matches FLASH size so a full firmware
+   replacement fits in the OTA staging area.
 */
 
-__FLASH_LEN = 1024k;
+__FLASH_LEN = 1536k;
 __DISK_IMAGE_LEN = 64k;
 __METADATA_LEN = 4k;
 __TOTAL_IMAGE_LENGTH = __FLASH_LEN + __DISK_IMAGE_LEN + __METADATA_LEN;
-__STAGING_LEN = 1024k;
+__STAGING_LEN = 1536k;
 __CONFIG_STORAGE_LEN = 4k;
+__BTSTACK_BANK_LEN = 8k;
+__CRUMB_STORAGE_LEN = 4k;
 __FLASH_TOTAL_SIZE = 4096k;
 
 MEMORY
@@ -39,12 +50,20 @@ MEMORY
     FW_METADATA(rw)   : ORIGIN = 0x10000000 + __FLASH_LEN + __DISK_IMAGE_LEN, LENGTH = __METADATA_LEN
     FW_STAGING(rw)    : ORIGIN = 0x10000000 + __TOTAL_IMAGE_LENGTH, LENGTH = __STAGING_LEN
 
+    /* 4 KB sector for debug boot-crumbs that need to survive a
+       reset_usb_boot() transition into the bootrom (which wipes all SRAM
+       including SCRATCH_X — verified empirically by tracer slots). The
+       firmware writes the SRAM crumb snapshot here on crash detection
+       BEFORE calling reset_usb_boot; picotool then reads it post-BOOTSEL. */
+    FLASH_CRUMB(rw)   : ORIGIN = 0x10000000 + (__FLASH_TOTAL_SIZE - __CONFIG_STORAGE_LEN - __BTSTACK_BANK_LEN - __CRUMB_STORAGE_LEN), LENGTH = __CRUMB_STORAGE_LEN
+    FLASH_BTSTACK_BANK(rw) : ORIGIN = 0x10000000 + (__FLASH_TOTAL_SIZE - __CONFIG_STORAGE_LEN - __BTSTACK_BANK_LEN), LENGTH = __BTSTACK_BANK_LEN
     FLASH_CONFIG(rw)  : ORIGIN = 0x10000000 + (__FLASH_TOTAL_SIZE - __CONFIG_STORAGE_LEN), LENGTH = __CONFIG_STORAGE_LEN
     RAM(rwx)          : ORIGIN = 0x20000000, LENGTH = 512k
     SCRATCH_X(rwx)    : ORIGIN = 0x20080000, LENGTH = 4k
     SCRATCH_Y(rwx)    : ORIGIN = 0x20081000, LENGTH = 4k
 }
 
+PROVIDE(_boot_crumb_flash = ORIGIN(FLASH_CRUMB));
 PROVIDE(_staging_metadata = ORIGIN(FW_STAGING) + (__STAGING_LEN - __METADATA_LEN));
 PROVIDE(_firmware_metadata = ORIGIN(FW_METADATA));
 
@@ -204,6 +223,17 @@ SECTIONS
     } > SCRATCH_X AT > FLASH
     __scratch_x_source__ = LOADADDR(.scratch_x);
 
+    /* NOLOAD scratch_x subsection for crumbs that must survive both a
+       watchdog reset AND a subsequent reset_usb_boot() into the bootrom.
+       SCRATCH_X is a separate 4 KB SRAM bank that the RP2350 USB bootrom
+       does not appear to use as workspace, unlike main SRAM. NOLOAD +
+       `AT> SCRATCH_X` keeps LMA in SCRATCH_X so objcopy doesn't see an
+       LMA conflict (same gotcha as .uninitialized_data above). */
+    .scratch_x_noinit (NOLOAD): {
+        . = ALIGN(4);
+        *(.scratch_x_noinit*)
+    } > SCRATCH_X AT> SCRATCH_X
+
     .scratch_y : {
         __scratch_y_start__ = .;
         *(.scratch_y.*)
@@ -273,6 +303,14 @@ SECTIONS
     .section_config (NOLOAD) : {
         ADDR_CONFIG = .;
     } > FLASH_CONFIG
+
+    .section_crumb (NOLOAD) : {
+        ADDR_CRUMB = .;
+    } > FLASH_CRUMB
+
+    .section_btstack_bank (NOLOAD) : {
+        ADDR_BTSTACK_BANK = .;
+    } > FLASH_BTSTACK_BANK
 
     /* by default we put core 0 stack at the end of scratch Y, so that if core 1
        stack is not used then all of SCRATCH_X is free. */

@@ -33,6 +33,8 @@ __METADATA_LEN = 4k;
 __TOTAL_IMAGE_LENGTH = 256k;
 
 __CONFIG_STORAGE_LEN = 4k;
+__BTSTACK_BANK_LEN = 8k;
+__CRUMB_STORAGE_LEN = 4k;
 
 MEMORY
 {
@@ -41,11 +43,16 @@ MEMORY
     FW_METADATA(rw) : ORIGIN = 0x10000000 + (__TOTAL_IMAGE_LENGTH - __METADATA_LEN), LENGTH = __METADATA_LEN
     FW_STAGING(rw) : ORIGIN = 0x10000000 + __TOTAL_IMAGE_LENGTH, LENGTH = __TOTAL_IMAGE_LENGTH
 
+    /* Reserved regions at top of 2 MB flash — NOLOAD so they cost nothing
+       in the .uf2 image.  Mirrors memory_map_rp2350.ld layout. */
+    FLASH_CRUMB(rw) : ORIGIN = 0x10000000 + (2048k - __CONFIG_STORAGE_LEN - __BTSTACK_BANK_LEN - __CRUMB_STORAGE_LEN), LENGTH = __CRUMB_STORAGE_LEN
+    FLASH_BTSTACK_BANK(rw) : ORIGIN = 0x10000000 + (2048k - __CONFIG_STORAGE_LEN - __BTSTACK_BANK_LEN), LENGTH = __BTSTACK_BANK_LEN
     FLASH_CONFIG(rw) : ORIGIN = 0x10000000 + (2048k - __CONFIG_STORAGE_LEN), LENGTH = __CONFIG_STORAGE_LEN
     RAM(rwx) : ORIGIN =  0x20000000, LENGTH = 256k
     SCRATCH_X(rwx) : ORIGIN = 0x20040000, LENGTH = 4k
     SCRATCH_Y(rwx) : ORIGIN = 0x20041000, LENGTH = 4k
 }
+PROVIDE(_boot_crumb_flash = ORIGIN(FLASH_CRUMB));
 PROVIDE(_staging_metadata = ORIGIN(FW_STAGING) + (__TOTAL_IMAGE_LENGTH - __METADATA_LEN));
 PROVIDE(_firmware_metadata = ORIGIN(FW_METADATA));
 
@@ -211,6 +218,11 @@ SECTIONS
     } > SCRATCH_X AT > FLASH
     __scratch_x_source__ = LOADADDR(.scratch_x);
 
+    .scratch_x_noinit (NOLOAD): {
+        . = ALIGN(4);
+        *(.scratch_x_noinit*)
+    } > SCRATCH_X AT> SCRATCH_X
+
     .scratch_y : {
         __scratch_y_start__ = .;
         *(.scratch_y.*)
@@ -266,6 +278,14 @@ SECTIONS
     .section_config (NOLOAD) : {
         ADDR_CONFIG = .;
     } > FLASH_CONFIG
+
+    .section_crumb (NOLOAD) : {
+        ADDR_CRUMB = .;
+    } > FLASH_CRUMB
+
+    .section_btstack_bank (NOLOAD) : {
+        ADDR_BTSTACK_BANK = .;
+    } > FLASH_BTSTACK_BANK
 
     /* .stack*_dummy section doesn't contains any symbols. It is only
      * used for linker to calculate size of stack sections, and assign
