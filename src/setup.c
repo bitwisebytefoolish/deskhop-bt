@@ -379,14 +379,20 @@ void initial_setup(device_t *state) {
      * path is verified working for the BT path (#8 in the phase plan). */
     bt_kbd_iface.protocol = 0; /* HID_PROTOCOL_BOOT */
 
-    /* BLE HID host (HOGP) peer: must come BEFORE bt_hid_host_init so its
-     * SM + GATT-client handlers are registered when hci_power_control
-     * (called inside bt_hid_host_init) brings the radio up.  Both
-     * transports come online together and either can pair the keyboard
-     * — Classic-only (rare), BLE-only (8BitDo Retro and most modern
-     * wireless keyboards), or dual-mode (Keychron K7).  See issue #29. */
-    bt_hid_host_le_init(&bt_hid_state);
+    /* Init order matters: bt_hid_host_init() calls l2cap_init() FIRST.
+     * sm_init() (inside bt_hid_host_le_init) registers an L2CAP signaling
+     * handler and assumes l2cap_init has already run — calling sm_init
+     * first leaves the SM in a half-initialised state and silent BLE
+     * pairing failures result (8BitDo connects but never receives our
+     * pairing request).  Match the order in BTstack's hog_boot_host_demo:
+     *   l2cap_init → sm_init → gatt_client_init → register handlers.
+     *
+     * hci_power_control() (called at the end of bt_hid_host_init) is
+     * non-blocking — the chip takes ~1 s to bring the radio up, so
+     * BTSTACK_EVENT_STATE → HCI_STATE_WORKING fires well after the
+     * subsequent bt_hid_host_le_init() finishes registering its handlers. */
     bt_hid_host_init(&bt_hid_state);
+    bt_hid_host_le_init(&bt_hid_state);
     watchdog_update();
     boot_crumb_set_phase(PHASE_AFTER_BT_HID_INIT);
 #endif
