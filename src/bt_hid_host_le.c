@@ -6,16 +6,32 @@
  * src/include/bt_hid_host_le.h for the architectural rationale and #29
  * for the use-case motivation (8BitDo Retro and other BLE-only keyboards).
  *
- * The state-machine and packet-handler shape mirrors BTstack's reference
- * example pico-sdk/lib/btstack/example/hog_boot_host_demo.c, adapted to:
- *   - keyboard-only (skip mouse boot characteristic),
- *   - feed reports through deskhop's bt_hid_state_t.process_report so
- *     they enter the same kbd_queue → tud_hid / UART pipeline used by
- *     the Classic path,
- *   - log every state transition over the debug UART (#26) so the
- *     pairing flow is observable in real time. */
+ * Initial implementation tried boot-mode HOGP (manual GATT discovery of
+ * the BOOT_KEYBOARD_INPUT_REPORT characteristic).  The 8BitDo Retro
+ * silently rejected the PROTOCOL_MODE = BOOT write — connection reached
+ * "READY" but no notifications ever arrived, and the link dropped after
+ * a few seconds.  Modern BLE keyboards routinely lack boot-mode support
+ * (BIOS hosts are essentially extinct).
+ *
+ * Switched to BTstack's hids_client helper, which handles report-mode
+ * HOGP end-to-end: discovers HID service(s), reads each report's
+ * REPORT_REFERENCE descriptor to determine report ID + type, subscribes
+ * to all INPUT reports via CCCD, and emits a single
+ * GATTSERVICE_SUBEVENT_HID_REPORT event per incoming report with the
+ * raw bytes.  Boot-mode is still supported by passing
+ * HID_PROTOCOL_MODE_BOOT, but we default to REPORT mode.
+ *
+ * Report data is converted to deskhop's 8-byte boot-keyboard format
+ * (modifier + reserved + 6 keycodes) by walking the report with
+ * BTstack's btstack_hid_parser and extracting keyboard-page (0x07)
+ * usages.  We feed THAT into process_keyboard_report — which, with
+ * iface->protocol = HID_PROTOCOL_BOOT (set in setup.c), takes the
+ * _extract_kbd_boot path and copies the 8 bytes straight through.
+ * So both transports (Classic boot, BLE report) converge at the same
+ * deskhop entry point without per-transport conditionals downstream.
+ *
+ * Reference: pico-sdk/lib/btstack/example/hog_host_demo.c. */
 
-/* BTstack-only includes — see bt_hid_host.c for why we avoid btstack.h. */
 #include "bluetooth.h"
 #include "bluetooth_gatt.h"
 #include "hci.h"
@@ -23,13 +39,16 @@
 #include "gap.h"
 #include "btstack_event.h"
 #include "btstack_util.h"
+#include "btstack_hid.h"
+#include "btstack_hid_parser.h"
 #include "ble/sm.h"
 #include "ble/gatt_client.h"
 #include "ble/att_db.h"
+#include "ble/gatt-service/hids_client.h"
 #include "ad_parser.h"
-#include "btstack_tlv.h"     /* bond storage via TLV (reuses pico_btstack_flash_bank) */
+#include "btstack_tlv.h"
 
-#include <stdio.h>   /* printf — routed to stdio_uart on UART1 / GP4, see #26 */
+#include <stdio.h>
 #include <string.h>
 
 #include "bt_hid_host_le.h"
@@ -38,54 +57,52 @@
 
 static bt_hid_state_t *g_bt;
 
-/* ---- LE-specific app state machine -------------------------------- */
+/* ---- App state machine -------------------------------------------- */
 
 typedef enum {
     LE_W4_WORKING,                /* wait for HCI_STATE_WORKING */
     LE_W4_HID_DEVICE_FOUND,       /* scanning, waiting for HID adv */
-    LE_W4_CONNECTED,              /* gap_connect issued, waiting for LE-conn-complete */
-    LE_W4_ENCRYPTED,              /* sm_request_pairing issued */
-    LE_W4_HID_SERVICE_FOUND,      /* discovering primary HID service */
-    LE_W4_HID_CHARACTERISTICS,    /* discovering BOOT_KEYBOARD_INPUT_REPORT + PROTOCOL_MODE */
-    LE_W4_BOOT_KEYBOARD_ENABLED,  /* writing CCCD to enable notifications */
-    LE_READY,                     /* notifications flowing */
+    LE_W4_CONNECTED,              /* gap_connect issued, waiting for LE_CONNECTION_COMPLETE */
+    LE_W4_ENCRYPTED,              /* connection up; waiting for pairing or re-encryption */
+    LE_W4_HIDS_CONNECTED,         /* hids_client running its discovery */
+    LE_READY,                     /* HID input reports flowing */
     LE_W4_TIMEOUT_THEN_SCAN,
     LE_W4_TIMEOUT_THEN_RECONNECT,
 } le_app_state_t;
 
 static le_app_state_t le_state = LE_W4_WORKING;
 
-/* Remote device (the BLE keyboard we're connecting to). */
+/* Remote BLE device we're connecting to. */
 typedef struct {
     bd_addr_t      addr;
     bd_addr_type_t addr_type;
 } le_device_addr_t;
 
-static le_device_addr_t       le_remote;
-static hci_con_handle_t       le_connection_handle = HCI_CON_HANDLE_INVALID;
+static le_device_addr_t le_remote;
+static hci_con_handle_t le_connection_handle = HCI_CON_HANDLE_INVALID;
 
-/* GATT-client query state. */
-static gatt_client_service_t        hid_service;
-static gatt_client_characteristic_t protocol_mode_characteristic;
-static gatt_client_characteristic_t boot_keyboard_input_characteristic;
-static gatt_client_notification_t   keyboard_notifications;
+/* hids_client state.  cid is the per-connection HID client ID; descriptor
+ * storage holds the parsed REPORT_MAP from the peripheral (used by the
+ * btstack_hid_parser when we extract keys from each report).  Size chosen
+ * to fit a typical keyboard's HID descriptor (200–400 B) with some slack. */
+#define LE_HID_DESCRIPTOR_STORAGE_LEN  512
+static uint8_t  le_hid_descriptor_storage[LE_HID_DESCRIPTOR_STORAGE_LEN];
+static uint16_t le_hids_cid;
 
-/* Connection / reconnect timer. */
+/* Connection-establishment + reconnect timer. */
 static btstack_timer_source_t le_connection_timer;
 
-/* Packet-callback registrations.  These structs must outlive registration
- * since hci_add_event_handler stores a pointer; file-scope is fine. */
+/* Packet-callback registrations.  Must outlive registration (file-scope OK). */
 static btstack_packet_callback_registration_t le_hci_cb;
 static btstack_packet_callback_registration_t le_sm_cb;
 
-/* Bond storage: persisted across reboots via the same TLV that backs the
- * Classic link-key DB.  Survives power cycles; cleared when the user
- * forgets the device through #22's LCD UI (eventually) or by a flash erase. */
+/* Bond persistence: device address/type stored under a tag so we can
+ * prefer a direct reconnect on boot rather than re-scanning. */
 #define TLV_TAG_HOGD ((((uint32_t)'H') << 24) | (((uint32_t)'O') << 16) | (((uint32_t)'G') << 8) | 'D')
 static const btstack_tlv_t *le_tlv_impl;
 static void                *le_tlv_ctx;
 
-/* ---- Forward declarations ----------------------------------------- */
+/* ---- forward declarations ----------------------------------------- */
 
 static void le_start_scan(void);
 static void le_start_connect(void);
@@ -93,15 +110,16 @@ static void le_connect_to_remote(void);
 static void le_connection_timeout_cb(btstack_timer_source_t *ts);
 static void le_reconnect_timeout_cb(btstack_timer_source_t *ts);
 static void le_handle_outgoing_connection_error(void);
+static void le_kick_hids_client(void);
 
 static void le_packet_handler(uint8_t packet_type, uint16_t channel,
                               uint8_t *packet, uint16_t size);
 static void le_sm_packet_handler(uint8_t packet_type, uint16_t channel,
                                  uint8_t *packet, uint16_t size);
-static void le_gatt_client_event_handler(uint8_t packet_type, uint16_t channel,
+static void le_hids_client_event_handler(uint8_t packet_type, uint16_t channel,
                                          uint8_t *packet, uint16_t size);
-static void le_handle_notification(uint8_t packet_type, uint16_t channel,
-                                   uint8_t *packet, uint16_t size);
+static void le_handle_input_report(uint8_t service_index,
+                                   const uint8_t *report, uint16_t report_len);
 
 /* ---- helpers ------------------------------------------------------- */
 
@@ -115,15 +133,11 @@ static bool le_adv_contains_hid_service(const uint8_t *packet) {
 static void le_start_scan(void) {
     printf("[ble] scanning for HID peripherals (UUID 0x1812)\n");
     le_state = LE_W4_HID_DEVICE_FOUND;
-    /* Passive scan, 100% duty cycle: scan_interval == scan_window == 48
-     * (30 ms / 30 ms).  Same values as the BTstack reference. */
     gap_set_scan_parameters(0, 48, 48);
     gap_start_scan();
 }
 
 static void le_connect_to_remote(void) {
-    /* Connection-establishment timeout: 10 s.  If the peripheral doesn't
-     * complete LE connect within this, cancel and fall back to scanning. */
     btstack_run_loop_set_timer(&le_connection_timer, 10000);
     btstack_run_loop_set_timer_handler(&le_connection_timer, &le_connection_timeout_cb);
     btstack_run_loop_add_timer(&le_connection_timer);
@@ -136,8 +150,6 @@ static void le_connect_to_remote(void) {
 }
 
 static void le_start_connect(void) {
-    /* On startup: if we have a bonded device, try reconnecting to it
-     * directly; otherwise scan for a new one. */
     btstack_tlv_get_instance(&le_tlv_impl, &le_tlv_ctx);
     if (le_tlv_impl) {
         int n = le_tlv_impl->get_tag(le_tlv_ctx, TLV_TAG_HOGD,
@@ -169,173 +181,148 @@ static void le_reconnect_timeout_cb(btstack_timer_source_t *ts) {
 
 static void le_handle_outgoing_connection_error(void) {
     printf("[ble] outgoing connection error — disconnect + rescan\n");
-    if (le_connection_handle != HCI_CON_HANDLE_INVALID) {
+    if (le_connection_handle != HCI_CON_HANDLE_INVALID)
         gap_disconnect(le_connection_handle);
-    }
     le_start_scan();
 }
 
-/* ---- Notification handler: HID input report arrived --------------- */
-
-static void le_handle_notification(uint8_t packet_type, uint16_t channel,
-                                   uint8_t *packet, uint16_t size) {
-    (void)packet_type;
-    (void)channel;
-    (void)size;
-
-    uint8_t evt = hci_event_packet_get_type(packet);
-    if (evt != GATT_EVENT_NOTIFICATION) {
-        /* Useful to surface if BTstack ever delivers e.g.
-         * GATT_EVENT_INDICATION through this path instead. */
-        printf("[ble] le_handle_notification got event=0x%02x (not notify)\n", evt);
+/* Kick off hids_client discovery once the encrypted link is up.  Called
+ * from SM_EVENT_PAIRING_COMPLETE / SM_EVENT_REENCRYPTION_COMPLETE on
+ * success.  hids_client_connect handles all the GATT bookkeeping —
+ * REPORT_MAP, REPORT characteristics, REPORT_REFERENCE descriptors,
+ * CCCD subscriptions — and emits GATTSERVICE_SUBEVENT_HID_REPORT for
+ * each notification once subscribed. */
+static void le_kick_hids_client(void) {
+    if (le_state == LE_W4_HIDS_CONNECTED || le_state == LE_READY) {
+        /* Already kicking — multiple SM events can fire on bonded
+         * reconnects (RESOLVING_SUCCEEDED then REENCRYPTION_COMPLETE).
+         * Idempotent guard. */
         return;
     }
-
-    const uint8_t *value     = gatt_event_notification_get_value(packet);
-    uint16_t       value_len = gatt_event_notification_get_value_length(packet);
-
-    /* Log every notification so we can confirm data flow.  Will be
-     * VERY noisy during typing but the boot-mode rate (1 per key
-     * event, ~125 Hz max) is well within stdio_uart's budget at
-     * 115200 baud (~11.5 kBps).  Remove once stable. */
-    printf("[ble] notify len=%u [%02x %02x %02x %02x %02x %02x %02x %02x]\n",
-           value_len,
-           value_len > 0 ? value[0] : 0,
-           value_len > 1 ? value[1] : 0,
-           value_len > 2 ? value[2] : 0,
-           value_len > 3 ? value[3] : 0,
-           value_len > 4 ? value[4] : 0,
-           value_len > 5 ? value[5] : 0,
-           value_len > 6 ? value[6] : 0,
-           value_len > 7 ? value[7] : 0);
-
-    if (!g_bt || !g_bt->process_report || !g_bt->kbd_iface)
+    le_state = LE_W4_HIDS_CONNECTED;
+    uint8_t status = hids_client_connect(le_connection_handle,
+                                         &le_hids_client_event_handler,
+                                         HID_PROTOCOL_MODE_REPORT,
+                                         &le_hids_cid);
+    if (status != ERROR_CODE_SUCCESS) {
+        printf("[ble] hids_client_connect FAIL status=0x%02x\n", status);
+        le_handle_outgoing_connection_error();
         return;
-
-    /* HOGP boot-keyboard notifications carry the same 8-byte format as
-     * Classic boot-mode reports — modifier + reserved + 6 keycodes.  No
-     * L2CAP transaction header to strip (that's a Classic-side concern).
-     * Hand straight to deskhop's process_keyboard_report; _extract_kbd_boot
-     * does the rest (iface->protocol = 0 / HID_PROTOCOL_BOOT, set in
-     * setup.c before bt_hid_host_init). */
-    g_bt->process_report((uint8_t *)value, (int)value_len,
-                         g_bt->kbd_itf, g_bt->kbd_iface);
+    }
+    printf("[ble] hids_client_connect started (cid=0x%04x, report-mode)\n",
+           le_hids_cid);
 }
 
-/* ---- GATT client state machine: service + char discovery + CCCD -- */
+/* ---- HID input report → deskhop's boot-keyboard pipeline --------- */
 
-static void le_gatt_client_event_handler(uint8_t packet_type, uint16_t channel,
+static void le_handle_input_report(uint8_t service_index,
+                                   const uint8_t *report, uint16_t report_len) {
+    if (report_len < 1)
+        return;
+
+    /* Standard boot-keyboard layout we'll build into and forward:
+     *   [0] modifier byte (8 bits, one per modifier key)
+     *   [1] reserved (0)
+     *   [2..7] up to 6 keycodes
+     * deskhop's iface->protocol = HID_PROTOCOL_BOOT (set in setup.c)
+     * makes extract_kbd_data take _extract_kbd_boot which is a straight
+     * memcpy of the 8 bytes — no descriptor-parsing dependency.       */
+    uint8_t boot_report[8] = {0};
+    int     key_count      = 0;
+
+    /* Iterate the report fields using the peripheral's HID descriptor
+     * (stored by hids_client during its discovery phase).  Pick out
+     * keyboard-page (0x07) usages, building modifier bits and keycode
+     * slots in the boot format. */
+    btstack_hid_parser_t parser;
+    btstack_hid_parser_init(
+        &parser,
+        hids_client_descriptor_storage_get_descriptor_data(le_hids_cid, service_index),
+        hids_client_descriptor_storage_get_descriptor_len(le_hids_cid, service_index),
+        HID_REPORT_TYPE_INPUT, report, report_len);
+
+    while (btstack_hid_parser_has_more(&parser)) {
+        uint16_t usage_page, usage;
+        int32_t  value;
+        btstack_hid_parser_get_field(&parser, &usage_page, &usage, &value);
+        if (usage_page != 0x07)
+            continue;
+        if (value == 0)
+            continue;
+        if (usage >= 0xE0 && usage <= 0xE7) {
+            /* Modifier key: pack into bit (usage - 0xE0). */
+            boot_report[0] |= (uint8_t)(1u << (usage - 0xE0));
+            continue;
+        }
+        if (key_count < 6) {
+            /* Regular key: place into next free keycode slot. */
+            boot_report[2 + key_count++] = (uint8_t)usage;
+        }
+    }
+
+    /* Forward to deskhop.  Even an all-zero report is meaningful — it's
+     * the key-up notification — so don't filter. */
+    if (g_bt && g_bt->process_report && g_bt->kbd_iface) {
+        g_bt->process_report(boot_report, sizeof(boot_report),
+                             g_bt->kbd_itf, g_bt->kbd_iface);
+    }
+}
+
+/* ---- hids_client event handler ----------------------------------- */
+
+static void le_hids_client_event_handler(uint8_t packet_type, uint16_t channel,
                                          uint8_t *packet, uint16_t size) {
     (void)packet_type;
     (void)channel;
     (void)size;
 
-    gatt_client_characteristic_t characteristic;
-    uint8_t  att_status;
-    /* HID protocol mode 0 = BOOT (per HOGP spec).  We write this to the
-     * peripheral's PROTOCOL_MODE characteristic to switch it into boot
-     * report format, matching the Classic-side BOOT mode choice. */
-    static uint8_t boot_protocol_mode = 0;
+    if (hci_event_packet_get_type(packet) != HCI_EVENT_GATTSERVICE_META)
+        return;
 
-    switch (le_state) {
-        case LE_W4_HID_SERVICE_FOUND:
-            switch (hci_event_packet_get_type(packet)) {
-                case GATT_EVENT_SERVICE_QUERY_RESULT:
-                    gatt_event_service_query_result_get_service(packet, &hid_service);
-                    break;
-                case GATT_EVENT_QUERY_COMPLETE:
-                    att_status = gatt_event_query_complete_get_att_status(packet);
-                    if (att_status != ATT_ERROR_SUCCESS) {
-                        printf("[ble] HID service discovery FAIL att=0x%02x\n", att_status);
-                        le_handle_outgoing_connection_error();
-                        break;
-                    }
-                    printf("[ble] HID service discovered, finding characteristics\n");
-                    le_state = LE_W4_HID_CHARACTERISTICS;
-                    gatt_client_discover_characteristics_for_service(
-                        &le_gatt_client_event_handler,
-                        le_connection_handle, &hid_service);
-                    break;
-                default: break;
+    uint8_t subevent = hci_event_gattservice_meta_get_subevent_code(packet);
+    switch (subevent) {
+        case GATTSERVICE_SUBEVENT_HID_SERVICE_CONNECTED: {
+            uint8_t status = gattservice_subevent_hid_service_connected_get_status(packet);
+            if (status != ERROR_CODE_SUCCESS) {
+                printf("[ble] HID service client connect FAIL status=0x%02x\n", status);
+                le_handle_outgoing_connection_error();
+                break;
+            }
+            printf("[ble] HID service client CONNECTED (%u services) — READY for input\n",
+                   gattservice_subevent_hid_service_connected_get_num_instances(packet));
+            le_state = LE_READY;
+            if (g_bt && g_bt->keyboard_connected)
+                *g_bt->keyboard_connected = true;
+            /* Persist the device address for fast direct-reconnect on
+             * next boot.  Without this, we'd scan every time. */
+            if (le_tlv_impl) {
+                le_tlv_impl->store_tag(le_tlv_ctx, TLV_TAG_HOGD,
+                                       (const uint8_t *)&le_remote,
+                                       sizeof(le_remote));
             }
             break;
+        }
 
-        case LE_W4_HID_CHARACTERISTICS:
-            switch (hci_event_packet_get_type(packet)) {
-                case GATT_EVENT_CHARACTERISTIC_QUERY_RESULT:
-                    gatt_event_characteristic_query_result_get_characteristic(packet, &characteristic);
-                    switch (characteristic.uuid16) {
-                        case ORG_BLUETOOTH_CHARACTERISTIC_BOOT_KEYBOARD_INPUT_REPORT:
-                            printf("[ble] found BOOT_KEYBOARD_INPUT_REPORT (handle 0x%04x)\n",
-                                   characteristic.value_handle);
-                            memcpy(&boot_keyboard_input_characteristic, &characteristic,
-                                   sizeof(characteristic));
-                            break;
-                        case ORG_BLUETOOTH_CHARACTERISTIC_PROTOCOL_MODE:
-                            printf("[ble] found PROTOCOL_MODE\n");
-                            memcpy(&protocol_mode_characteristic, &characteristic,
-                                   sizeof(characteristic));
-                            break;
-                        default:
-                            /* ignore boot-mouse + report-mode characteristics */
-                            break;
-                    }
-                    break;
-                case GATT_EVENT_QUERY_COMPLETE:
-                    att_status = gatt_event_query_complete_get_att_status(packet);
-                    if (att_status != ATT_ERROR_SUCCESS) {
-                        printf("[ble] characteristic discovery FAIL att=0x%02x\n", att_status);
-                        le_handle_outgoing_connection_error();
-                        break;
-                    }
-                    printf("[ble] enabling notifications on BOOT_KEYBOARD_INPUT_REPORT\n");
-                    le_state = LE_W4_BOOT_KEYBOARD_ENABLED;
-                    gatt_client_write_client_characteristic_configuration(
-                        &le_gatt_client_event_handler, le_connection_handle,
-                        &boot_keyboard_input_characteristic,
-                        GATT_CLIENT_CHARACTERISTICS_CONFIGURATION_NOTIFICATION);
-                    break;
-                default: break;
-            }
+        case GATTSERVICE_SUBEVENT_HID_SERVICE_DISCONNECTED:
+            printf("[ble] HID service client disconnected\n");
+            /* The LE link teardown follows; HCI_EVENT_DISCONNECTION_COMPLETE
+             * in our HCI handler then resets state and re-scans. */
             break;
 
-        case LE_W4_BOOT_KEYBOARD_ENABLED:
-            switch (hci_event_packet_get_type(packet)) {
-                case GATT_EVENT_QUERY_COMPLETE:
-                    att_status = gatt_event_query_complete_get_att_status(packet);
-                    if (att_status != ATT_ERROR_SUCCESS) {
-                        printf("[ble] CCCD write FAIL att=0x%02x\n", att_status);
-                        le_handle_outgoing_connection_error();
-                        break;
-                    }
-                    /* Register our notification listener and switch the
-                     * peripheral into boot-mode reporting. */
-                    gatt_client_listen_for_characteristic_value_updates(
-                        &keyboard_notifications, &le_handle_notification,
-                        le_connection_handle, &boot_keyboard_input_characteristic);
-                    printf("[ble] writing PROTOCOL_MODE = BOOT (0)\n");
-                    gatt_client_write_value_of_characteristic_without_response(
-                        le_connection_handle, protocol_mode_characteristic.value_handle,
-                        1, &boot_protocol_mode);
-                    /* Persist this device as the preferred reconnect target. */
-                    if (le_tlv_impl) {
-                        le_tlv_impl->store_tag(le_tlv_ctx, TLV_TAG_HOGD,
-                                               (const uint8_t *)&le_remote, sizeof(le_remote));
-                    }
-                    le_state = LE_READY;
-                    if (g_bt && g_bt->keyboard_connected)
-                        *g_bt->keyboard_connected = true;
-                    printf("[ble] READY — keystrokes flowing\n");
-                    break;
-                default: break;
-            }
+        case GATTSERVICE_SUBEVENT_HID_REPORT:
+            le_handle_input_report(
+                gattservice_subevent_hid_report_get_service_index(packet),
+                gattservice_subevent_hid_report_get_report(packet),
+                gattservice_subevent_hid_report_get_report_len(packet));
             break;
 
-        default: break;
+        default:
+            printf("[ble] unhandled gattservice subevent=0x%02x\n", subevent);
+            break;
     }
 }
 
-/* ---- SM (Security Manager) packet handler: pairing exchange ------ */
+/* ---- SM packet handler: pairing exchange ------------------------- */
 
 static void le_sm_packet_handler(uint8_t packet_type, uint16_t channel,
                                  uint8_t *packet, uint16_t size) {
@@ -345,7 +332,7 @@ static void le_sm_packet_handler(uint8_t packet_type, uint16_t channel,
     if (packet_type != HCI_EVENT_PACKET)
         return;
 
-    bool proceed_to_service_discovery = false;
+    bool security_up = false;
 
     switch (hci_event_packet_get_type(packet)) {
         case SM_EVENT_JUST_WORKS_REQUEST:
@@ -354,12 +341,30 @@ static void le_sm_packet_handler(uint8_t packet_type, uint16_t channel,
             break;
 
         case SM_EVENT_NUMERIC_COMPARISON_REQUEST:
-            /* The deskhop has no display — we accept whatever number the
-             * peripheral suggests.  Not maximally secure but matches our
-             * "no display, no keyboard input" IO capability. */
             printf("[ble] numeric comparison request — auto-confirm\n");
             sm_numeric_comparison_confirm(
                 sm_event_numeric_comparison_request_get_handle(packet));
+            break;
+
+        case SM_EVENT_IDENTITY_RESOLVING_STARTED:
+            printf("[ble] identity resolving started (peer using RPA)\n");
+            break;
+
+        case SM_EVENT_IDENTITY_RESOLVING_FAILED:
+            printf("[ble] identity resolving FAILED (no bond — first-pair path)\n");
+            break;
+
+        case SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED:
+            printf("[ble] identity resolving SUCCEEDED (matched stored bond)\n");
+            break;
+
+        case SM_EVENT_REENCRYPTION_STARTED:
+            printf("[ble] re-encryption started\n");
+            break;
+
+        case SM_EVENT_REENCRYPTION_COMPLETE:
+            printf("[ble] re-encryption complete — using stored bond\n");
+            security_up = true;
             break;
 
         case SM_EVENT_PAIRING_COMPLETE: {
@@ -367,7 +372,7 @@ static void le_sm_packet_handler(uint8_t packet_type, uint16_t channel,
             switch (status) {
                 case ERROR_CODE_SUCCESS:
                     printf("[ble] pairing complete: SUCCESS\n");
-                    proceed_to_service_discovery = true;
+                    security_up = true;
                     break;
                 case ERROR_CODE_CONNECTION_TIMEOUT:
                     printf("[ble] pairing FAIL: timeout\n");
@@ -386,63 +391,23 @@ static void le_sm_packet_handler(uint8_t packet_type, uint16_t channel,
             break;
         }
 
-        case SM_EVENT_REENCRYPTION_COMPLETE:
-            /* This fires on the path where a previously-bonded device
-             * reconnects and the existing LTK is used to re-encrypt
-             * without a fresh pairing exchange.  Treat it as success. */
-            printf("[ble] re-encryption complete — using stored bond\n");
-            proceed_to_service_discovery = true;
-            break;
-
-        case SM_EVENT_IDENTITY_RESOLVING_STARTED:
-            /* Peer used a Resolvable Private Address; BTstack is trying
-             * to resolve it against our LE device DB.  Informational. */
-            printf("[ble] identity resolving started (peer using RPA)\n");
-            break;
-
-        case SM_EVENT_IDENTITY_RESOLVING_FAILED:
-            /* RPA could not be resolved — peer is unknown (no bond yet)
-             * or its IRK doesn't match anything in our DB.  Expected on
-             * first-pair; on subsequent pairs this becomes SUCCEEDED. */
-            printf("[ble] identity resolving FAILED (no bond — first-pair path)\n");
-            break;
-
-        case SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED:
-            /* IRK matched a bonded peer — we know this device. */
-            printf("[ble] identity resolving SUCCEEDED (matched stored bond)\n");
-            break;
-
-        case SM_EVENT_REENCRYPTION_STARTED:
-            /* Bonded reconnect path: BTstack is using the stored LTK
-             * to bring the link back up encrypted without a fresh
-             * pairing exchange. */
-            printf("[ble] re-encryption started\n");
-            break;
-
         default:
-            /* Diagnostic: log any SM event we don't explicitly handle.
-             * Helps identify cases like SM_EVENT_PAIRING_STARTED or
-             * passkey display where the peer expects us to do something
-             * we're not.  Remove or gate behind a debug flag once the
-             * SM exchange is stable on the K7 + 8BitDo. */
             printf("[ble] unhandled SM event type=0x%02x\n",
                    hci_event_packet_get_type(packet));
             break;
     }
 
-    /* No explicit re-issue of GATT discovery here.  Since we removed the
-     * sm_request_pairing() call on LE_CONNECTION_COMPLETE, GATT discovery
-     * starts immediately and BTstack pauses it internally if/when the
-     * peripheral demands encryption.  Once SM_EVENT_PAIRING_COMPLETE or
-     * SM_EVENT_REENCRYPTION_COMPLETE fires, BTstack auto-resumes the
-     * paused GATT query — we don't need to do anything.  The
-     * `proceed_to_service_discovery` flag becomes a pure log assertion. */
-    if (proceed_to_service_discovery) {
-        printf("[ble] security elevated — pending GATT query should resume\n");
+    if (security_up) {
+        /* Encrypted link is up.  Now kick off the HID service client
+         * — its GATT discovery is allowed to run on the now-encrypted
+         * link, and the 8BitDo (and similar BLE-only keyboards) will
+         * happily respond to characteristic + descriptor queries that
+         * would otherwise have been rejected. */
+        le_kick_hids_client();
     }
 }
 
-/* ---- HCI / GAP packet handler: state, advertising, connect, disc -- */
+/* ---- HCI / GAP packet handler ----------------------------------- */
 
 static void le_packet_handler(uint8_t packet_type, uint16_t channel,
                               uint8_t *packet, uint16_t size) {
@@ -455,11 +420,6 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
     uint8_t event_type = hci_event_packet_get_type(packet);
     switch (event_type) {
         case BTSTACK_EVENT_STATE:
-            /* BTSTACK_EVENT_STATE → HCI_STATE_WORKING also reaches the
-             * Classic packet handler in bt_hid_host.c, which starts
-             * Classic inquiry there.  Here we additionally kick off the
-             * BLE side: either scan for new peripherals or reconnect to
-             * the last-bonded one. */
             if (btstack_event_state_get_state(packet) != HCI_STATE_WORKING)
                 break;
             if (le_state != LE_W4_WORKING)
@@ -473,10 +433,6 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
                 break;
             if (!le_adv_contains_hid_service(packet))
                 break;
-            /* Stop scanning and connect.  We log every advertising report
-             * that contains the HID service UUID — useful when there are
-             * multiple BLE keyboards in range and we want to confirm
-             * which one we latched onto. */
             gap_stop_scan();
             gap_event_advertising_report_get_address(packet, le_remote.addr);
             le_remote.addr_type = gap_event_advertising_report_get_address_type(packet);
@@ -496,34 +452,27 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
             btstack_run_loop_remove_timer(&le_connection_timer);
             le_connection_handle =
                 gap_subevent_le_connection_complete_get_connection_handle(packet);
-            /* Skip the explicit sm_request_pairing() — earlier attempt timed
-             * out with the 8BitDo Retro (no SM events ever arrived).  Some
-             * BLE peripherals only respond to security elevation when it's
-             * triggered organically by a GATT operation that requires it.
-             * Jump straight to GATT service discovery instead; BTstack
-             * automatically initiates pairing when the peripheral rejects
-             * an unauthenticated read with "Insufficient Authentication".
-             * SM event handler still catches the resulting just-works /
-             * numeric-comparison / pairing-complete events. */
-            printf("[ble] LE connection complete (handle 0x%04x) — discovering HID service (security follows automatically if required)\n",
+            /* Connection is up but not yet encrypted.  Wait for the SM
+             * exchange (just-works pairing on first connect, or
+             * re-encryption from stored LTK on subsequent connects) to
+             * complete, then kick hids_client.  gatt_client_set_required_
+             * security_level(LEVEL_2) from init triggers pairing
+             * automatically if hids_client's GATT queries hit
+             * insufficient-encryption errors, but in practice the
+             * peripheral initiates security itself or BTstack handles
+             * it as part of the bond-resume flow. */
+            le_state = LE_W4_ENCRYPTED;
+            printf("[ble] LE connection complete (handle 0x%04x) — waiting for security\n",
                    le_connection_handle);
-            le_state = LE_W4_HID_SERVICE_FOUND;
-            gatt_client_discover_primary_services_by_uuid16(
-                &le_gatt_client_event_handler, le_connection_handle,
-                ORG_BLUETOOTH_SERVICE_HUMAN_INTERFACE_DEVICE);
+            sm_request_pairing(le_connection_handle);
             break;
 
-        case HCI_EVENT_DISCONNECTION_COMPLETE:
-            /* Filter: only react if THIS is our connection.  Classic
-             * disconnects also produce this event but with a different
-             * handle, and we don't want to clobber Classic state. */
+        case HCI_EVENT_DISCONNECTION_COMPLETE: {
             if (le_connection_handle == HCI_CON_HANDLE_INVALID)
                 break;
-            {
-                hci_con_handle_t h = hci_event_disconnection_complete_get_connection_handle(packet);
-                if (h != le_connection_handle)
-                    break;
-            }
+            hci_con_handle_t h = hci_event_disconnection_complete_get_connection_handle(packet);
+            if (h != le_connection_handle)
+                break;
             printf("[ble] LE disconnected (state was %d) — back to scan/reconnect loop\n",
                    (int)le_state);
             le_connection_handle = HCI_CON_HANDLE_INVALID;
@@ -541,55 +490,42 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
             btstack_run_loop_set_timer_handler(&le_connection_timer, &le_reconnect_timeout_cb);
             btstack_run_loop_add_timer(&le_connection_timer);
             break;
+        }
 
         default: break;
     }
 }
 
-/* ---- public init --------------------------------------------------- */
+/* ---- public init ------------------------------------------------- */
 
 void bt_hid_host_le_init(bt_hid_state_t *bt_state) {
     g_bt = bt_state;
 
-    /* Security Manager: just-works pairing, no display, no input.
-     * AuthReq is intentionally permissive — only request BONDING (so the
-     * LTK is stored for fast re-encryption on reconnect), and let the
-     * peripheral dictate the rest.  Initial implementation requested
-     * SM_AUTHREQ_SECURE_CONNECTION too, but the 8BitDo Retro Mechanical
-     * Keyboard timed out during pairing under that policy — likely a
-     * negotiation mismatch.  Removing the SC requirement makes us
-     * compatible with both legacy and SC-capable peripherals; the
-     * peripheral's own AuthReq still applies, so SC happens when both
-     * sides support it (which is usually the case for 2018+ devices). */
+    /* Security Manager — just-works pairing, permissive AuthReq (peripheral
+     * dictates).  See earlier commits in #29 for the rationale: requesting
+     * SC up-front caused the 8BitDo to time out the pairing exchange. */
     sm_init();
     sm_set_io_capabilities(IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
     sm_set_authentication_requirements(SM_AUTHREQ_BONDING);
 
-    /* GATT client — required to discover services + characteristics on
-     * the peripheral and to subscribe for notifications.  Set the
-     * required security level to LEVEL_2 (encrypted + bonded with no
-     * MITM, suitable for just-works pairing): BTstack will auto-initiate
-     * pairing whenever a GATT operation needs higher security than the
-     * current connection has.  This is the cleaner trigger than an
-     * explicit sm_request_pairing() call — the 8BitDo Retro doesn't
-     * respond to out-of-the-blue pairing requests, but it DOES respond
-     * to security elevation arising organically from a GATT op. */
+    /* GATT client base + security policy: BTstack auto-triggers pairing
+     * when an op needs higher security than the current connection has. */
     gatt_client_init();
     gatt_client_set_required_security_level(LEVEL_2);
 
-    /* Register for HCI / GAP events (BTSTACK_EVENT_STATE, advertising
-     * reports, LE connection-complete, disconnection-complete). */
+    /* HID Service client.  Stores per-service report descriptors here;
+     * we read them back during report parsing to drive btstack_hid_parser. */
+    hids_client_init(le_hid_descriptor_storage, sizeof(le_hid_descriptor_storage));
+
+    /* HCI / GAP events. */
     le_hci_cb.callback = &le_packet_handler;
     hci_add_event_handler(&le_hci_cb);
 
-    /* Register for SM events (pairing exchange + re-encryption). */
+    /* SM events. */
     le_sm_cb.callback = &le_sm_packet_handler;
     sm_add_event_handler(&le_sm_cb);
 
-    /* NOTE: do NOT call hci_power_control(HCI_POWER_ON) here.  The
-     * Classic init (bt_hid_host_init) does it after both transports
-     * have registered their handlers, so they come online together. */
-    printf("[ble] handlers registered, awaiting HCI_STATE_WORKING\n");
+    printf("[ble] handlers registered (hids_client, report-mode), awaiting HCI_STATE_WORKING\n");
 }
 
 #endif /* DH_BT_HID_HOST_KBD */
