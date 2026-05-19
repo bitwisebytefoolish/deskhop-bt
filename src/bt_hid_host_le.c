@@ -183,11 +183,31 @@ static void le_handle_notification(uint8_t packet_type, uint16_t channel,
     (void)channel;
     (void)size;
 
-    if (hci_event_packet_get_type(packet) != GATT_EVENT_NOTIFICATION)
+    uint8_t evt = hci_event_packet_get_type(packet);
+    if (evt != GATT_EVENT_NOTIFICATION) {
+        /* Useful to surface if BTstack ever delivers e.g.
+         * GATT_EVENT_INDICATION through this path instead. */
+        printf("[ble] le_handle_notification got event=0x%02x (not notify)\n", evt);
         return;
+    }
 
     const uint8_t *value     = gatt_event_notification_get_value(packet);
     uint16_t       value_len = gatt_event_notification_get_value_length(packet);
+
+    /* Log every notification so we can confirm data flow.  Will be
+     * VERY noisy during typing but the boot-mode rate (1 per key
+     * event, ~125 Hz max) is well within stdio_uart's budget at
+     * 115200 baud (~11.5 kBps).  Remove once stable. */
+    printf("[ble] notify len=%u [%02x %02x %02x %02x %02x %02x %02x %02x]\n",
+           value_len,
+           value_len > 0 ? value[0] : 0,
+           value_len > 1 ? value[1] : 0,
+           value_len > 2 ? value[2] : 0,
+           value_len > 3 ? value[3] : 0,
+           value_len > 4 ? value[4] : 0,
+           value_len > 5 ? value[5] : 0,
+           value_len > 6 ? value[6] : 0,
+           value_len > 7 ? value[7] : 0);
 
     if (!g_bt || !g_bt->process_report || !g_bt->kbd_iface)
         return;
@@ -383,9 +403,20 @@ static void le_sm_packet_handler(uint8_t packet_type, uint16_t channel,
         case SM_EVENT_IDENTITY_RESOLVING_FAILED:
             /* RPA could not be resolved — peer is unknown (no bond yet)
              * or its IRK doesn't match anything in our DB.  Expected on
-             * first-pair; on subsequent pairs the IRK is stored and this
-             * event becomes SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED. */
+             * first-pair; on subsequent pairs this becomes SUCCEEDED. */
             printf("[ble] identity resolving FAILED (no bond — first-pair path)\n");
+            break;
+
+        case SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED:
+            /* IRK matched a bonded peer — we know this device. */
+            printf("[ble] identity resolving SUCCEEDED (matched stored bond)\n");
+            break;
+
+        case SM_EVENT_REENCRYPTION_STARTED:
+            /* Bonded reconnect path: BTstack is using the stored LTK
+             * to bring the link back up encrypted without a fresh
+             * pairing exchange. */
+            printf("[ble] re-encryption started\n");
             break;
 
         default:
