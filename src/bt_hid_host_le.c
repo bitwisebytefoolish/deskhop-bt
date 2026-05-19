@@ -172,7 +172,7 @@ static void le_sm_packet_handler(uint8_t packet_type, uint16_t channel,
                                  uint8_t *packet, uint16_t size);
 static void le_hids_client_event_handler(uint8_t packet_type, uint16_t channel,
                                          uint8_t *packet, uint16_t size);
-static void le_handle_input_report(uint8_t service_index,
+static void le_handle_input_report(uint16_t hids_cid, uint8_t service_index,
                                    const uint8_t *report, uint16_t report_len);
 
 /* ---- helpers ------------------------------------------------------- */
