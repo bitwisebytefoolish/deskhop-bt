@@ -22,24 +22,45 @@ typedef struct {
 
     /* Populated by setup.c before bt_hid_host_init() is called. -------- */
 
-    /* Pointer to the hid_interface_t that parse_descriptor fills in.
-     * bt_hid_host.c passes this to process_report after the descriptor
-     * is parsed.  Allocated and owned by the caller. */
+    /* Pointer to the hid_interface_t used for keyboard reports.
+     * Pre-populated with protocol = HID_PROTOCOL_BOOT in setup.c so
+     * deskhop's extract_kbd_data takes the fixed-format _extract_kbd_boot
+     * path.  parse_descriptor (if it ever runs) fills it in further;
+     * REPORT-mode is currently not used so parse_descriptor is effectively
+     * a no-op for BT.  Allocated and owned by the caller (setup.c). */
     struct hid_interface_t *kbd_iface;
 
-    /* Interface index forwarded to process_report (slot in
-     * device_t.local_kbd_states[]).  Use 0 for the sole BT keyboard. */
+    /* Interface index forwarded to process_keyboard_report (slot in
+     * device_t.local_kbd_states[]).  Use 0 for the sole BT keyboard slot. */
     uint8_t kbd_itf;
 
-    /* Parse raw HID report descriptor bytes into kbd_iface.
-     * Points to parse_report_descriptor() from hid_parser.c. */
+    /* Pointer to the hid_interface_t used for mouse reports.  Separate
+     * iface so iface->mouse fields don't collide with iface->keyboard
+     * on a single struct.  Pre-populated with protocol = HID_PROTOCOL_BOOT
+     * in setup.c; deskhop's mouse pipeline in BOOT mode just casts the
+     * 5-byte buffer to hid_mouse_report_t (buttons, x, y, wheel, pan)
+     * and extracts those fields directly — no descriptor parsing. */
+    struct hid_interface_t *mouse_iface;
+
+    /* Interface index for the mouse — 1 (keyboard uses 0). */
+    uint8_t mouse_itf;
+
+    /* Parse raw HID report descriptor bytes into kbd_iface / mouse_iface.
+     * Points to parse_report_descriptor() from hid_parser.c.  Currently
+     * effectively unused on the BT path (everything is BOOT-mode), kept
+     * for the eventual #8 REPORT-mode reactivation. */
     void (*parse_descriptor)(struct hid_interface_t *iface,
                              const uint8_t *desc, int len);
 
-    /* Route a raw HID report through process_keyboard_report().
+    /* Route a raw HID keyboard report through process_keyboard_report().
      * Signature matches process_keyboard_report() in keyboard.h. */
     void (*process_report)(uint8_t *raw, int len, uint8_t itf,
                            struct hid_interface_t *iface);
+
+    /* Route a raw HID mouse report through process_mouse_report().
+     * Signature matches process_mouse_report() in mouse.h. */
+    void (*process_mouse_report)(uint8_t *raw, int len, uint8_t itf,
+                                 struct hid_interface_t *iface);
 
     /* ---- LED feedback plumbing -------------------------------------- *
      * The BT stage indicator (bt_hid_host_stage_tick) drives the on-board

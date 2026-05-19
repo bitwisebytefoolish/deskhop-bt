@@ -188,17 +188,21 @@ static void le_handle_outgoing_connection_error(void) {
 
 /* Kick off hids_client discovery once the encrypted link is up.  Called
  * from SM_EVENT_PAIRING_COMPLETE / SM_EVENT_REENCRYPTION_COMPLETE on
- * success.  hids_client_connect handles all the GATT bookkeeping —
- * REPORT_MAP, REPORT characteristics, REPORT_REFERENCE descriptors,
- * CCCD subscriptions — and emits GATTSERVICE_SUBEVENT_HID_REPORT for
- * each notification once subscribed. */
+ * success.  hids_client_connect allocates a new hids_client_t from the
+ * pool (MAX_NR_HIDS_CLIENTS — sized for multi-device in #9), so each
+ * concurrent BLE connection gets its own per-device state inside
+ * BTstack.  Our state machine tracks only the "currently connecting"
+ * device; once HIDS_SERVICE_CONNECTED arrives we resume scanning for
+ * additional peripherals.                                            */
 static void le_kick_hids_client(void) {
-    if (le_state == LE_W4_HIDS_CONNECTED || le_state == LE_READY) {
-        /* Already kicking — multiple SM events can fire on bonded
-         * reconnects (RESOLVING_SUCCEEDED then REENCRYPTION_COMPLETE).
-         * Idempotent guard. */
+    /* Idempotent against multiple SM events during a single connect
+     * (RESOLVING_SUCCEEDED then REENCRYPTION_COMPLETE both fire) —
+     * once we're in HIDS_CONNECTED or READY for this connection,
+     * don't re-issue.  The state is per-current-connect, not
+     * per-deskhop-lifetime; scan will be restarted after the
+     * service-connected event regardless. */
+    if (le_state == LE_W4_HIDS_CONNECTED || le_state == LE_READY)
         return;
-    }
     le_state = LE_W4_HIDS_CONNECTED;
     uint8_t status = hids_client_connect(le_connection_handle,
                                          &le_hids_client_event_handler,
@@ -213,27 +217,40 @@ static void le_kick_hids_client(void) {
            le_hids_cid);
 }
 
-/* ---- HID input report → deskhop's boot-keyboard pipeline --------- */
-
+/* ---- HID input report → deskhop's boot-keyboard / boot-mouse pipeline ----
+ *
+ * Per-report type dispatch: a HOGP peripheral can advertise both keyboard
+ * and mouse functionality in a single HID service (composite devices), or
+ * pure keyboard-only, or pure mouse-only.  Rather than detect the device
+ * type at pairing time, walk THIS report's fields and decide based on
+ * which usage pages we see:
+ *
+ *   Usage Page 0x07 (Keyboard/Keypad)         → build boot-keyboard report
+ *   Usage Page 0x01 (Generic Desktop): X/Y/Wheel + Usage Page 0x09 (Button) → boot-mouse
+ *
+ * Both reports can be built from the SAME notification if the descriptor
+ * mixes them (rare but legal).  Otherwise only one is forwarded.  A
+ * keyboard-only device sends nothing to the mouse pipeline; a mouse-only
+ * device sends nothing to the keyboard pipeline.  No per-device routing
+ * table needed.                                                          */
 static void le_handle_input_report(uint8_t service_index,
                                    const uint8_t *report, uint16_t report_len) {
     if (report_len < 1)
         return;
 
-    /* Standard boot-keyboard layout we'll build into and forward:
-     *   [0] modifier byte (8 bits, one per modifier key)
-     *   [1] reserved (0)
-     *   [2..7] up to 6 keycodes
-     * deskhop's iface->protocol = HID_PROTOCOL_BOOT (set in setup.c)
-     * makes extract_kbd_data take _extract_kbd_boot which is a straight
-     * memcpy of the 8 bytes — no descriptor-parsing dependency.       */
-    uint8_t boot_report[8] = {0};
-    int     key_count      = 0;
+    /* Boot-keyboard layout (8 bytes): [mod][rsvd][k1..k6] */
+    uint8_t kbd_report[8]  = {0};
+    bool    kbd_seen       = false;
+    int     kbd_key_count  = 0;
 
-    /* Iterate the report fields using the peripheral's HID descriptor
-     * (stored by hids_client during its discovery phase).  Pick out
-     * keyboard-page (0x07) usages, building modifier bits and keycode
-     * slots in the boot format. */
+    /* Boot-mouse layout (5 bytes, matches TinyUSB hid_mouse_report_t):
+     * [buttons][x][y][wheel][pan].  Wheel and pan are signed; x/y are
+     * relative deltas.  We accumulate signed values from descriptor
+     * fields and clamp to int8 at the end. */
+    uint8_t mouse_report[5] = {0};
+    bool    mouse_seen      = false;
+    int32_t mouse_dx = 0, mouse_dy = 0, mouse_wheel = 0, mouse_pan = 0;
+
     btstack_hid_parser_t parser;
     btstack_hid_parser_init(
         &parser,
@@ -245,26 +262,74 @@ static void le_handle_input_report(uint8_t service_index,
         uint16_t usage_page, usage;
         int32_t  value;
         btstack_hid_parser_get_field(&parser, &usage_page, &usage, &value);
-        if (usage_page != 0x07)
-            continue;
-        if (value == 0)
-            continue;
-        if (usage >= 0xE0 && usage <= 0xE7) {
-            /* Modifier key: pack into bit (usage - 0xE0). */
-            boot_report[0] |= (uint8_t)(1u << (usage - 0xE0));
-            continue;
-        }
-        if (key_count < 6) {
-            /* Regular key: place into next free keycode slot. */
-            boot_report[2 + key_count++] = (uint8_t)usage;
+
+        switch (usage_page) {
+            case 0x07: /* Keyboard / Keypad */
+                kbd_seen = true;
+                if (value == 0) break;
+                if (usage >= 0xE0 && usage <= 0xE7) {
+                    /* Modifier: pack into bit (usage - 0xE0). */
+                    kbd_report[0] |= (uint8_t)(1u << (usage - 0xE0));
+                } else if (kbd_key_count < 6) {
+                    kbd_report[2 + kbd_key_count++] = (uint8_t)usage;
+                }
+                break;
+
+            case 0x01: /* Generic Desktop — pointer X/Y/Wheel */
+                switch (usage) {
+                    case 0x30: mouse_dx    = value; mouse_seen = true; break;
+                    case 0x31: mouse_dy    = value; mouse_seen = true; break;
+                    case 0x38: mouse_wheel = value; mouse_seen = true; break;
+                    default: break;
+                }
+                break;
+
+            case 0x09: /* Button page — mouse buttons */
+                if (usage >= 1 && usage <= 8 && value != 0) {
+                    mouse_report[0] |= (uint8_t)(1u << (usage - 1));
+                    mouse_seen = true;
+                }
+                break;
+
+            case 0x0C: /* Consumer page — AC Pan (horizontal scroll) is 0x0238 */
+                if (usage == 0x0238) {
+                    mouse_pan  = value;
+                    mouse_seen = true;
+                }
+                break;
+
+            default:
+                break;
         }
     }
 
-    /* Forward to deskhop.  Even an all-zero report is meaningful — it's
-     * the key-up notification — so don't filter. */
-    if (g_bt && g_bt->process_report && g_bt->kbd_iface) {
-        g_bt->process_report(boot_report, sizeof(boot_report),
+    if (kbd_seen && g_bt && g_bt->process_report && g_bt->kbd_iface) {
+        /* Even an all-zero report is meaningful (key-up notification) so
+         * we forward whenever the descriptor had keyboard fields, not just
+         * when keys are pressed. */
+        g_bt->process_report(kbd_report, sizeof(kbd_report),
                              g_bt->kbd_itf, g_bt->kbd_iface);
+    }
+
+    if (mouse_seen && g_bt && g_bt->process_mouse_report && g_bt->mouse_iface) {
+        /* Clamp dx/dy/wheel/pan to int8 range — boot mouse fields are
+         * signed bytes.  Values from the descriptor can be wider when
+         * the peripheral declares a 12- or 16-bit logical range; saturate
+         * rather than overflow. */
+        if (mouse_dx > 127)       mouse_dx = 127;
+        else if (mouse_dx < -127) mouse_dx = -127;
+        if (mouse_dy > 127)       mouse_dy = 127;
+        else if (mouse_dy < -127) mouse_dy = -127;
+        if (mouse_wheel > 127)       mouse_wheel = 127;
+        else if (mouse_wheel < -127) mouse_wheel = -127;
+        if (mouse_pan > 127)         mouse_pan = 127;
+        else if (mouse_pan < -127)   mouse_pan = -127;
+        mouse_report[1] = (uint8_t)(int8_t)mouse_dx;
+        mouse_report[2] = (uint8_t)(int8_t)mouse_dy;
+        mouse_report[3] = (uint8_t)(int8_t)mouse_wheel;
+        mouse_report[4] = (uint8_t)(int8_t)mouse_pan;
+        g_bt->process_mouse_report(mouse_report, sizeof(mouse_report),
+                                   g_bt->mouse_itf, g_bt->mouse_iface);
     }
 }
 
@@ -290,16 +355,24 @@ static void le_hids_client_event_handler(uint8_t packet_type, uint16_t channel,
             }
             printf("[ble] HID service client CONNECTED (%u services) — READY for input\n",
                    gattservice_subevent_hid_service_connected_get_num_instances(packet));
-            le_state = LE_READY;
             if (g_bt && g_bt->keyboard_connected)
                 *g_bt->keyboard_connected = true;
-            /* Persist the device address for fast direct-reconnect on
-             * next boot.  Without this, we'd scan every time. */
+            /* Persist this device address for fast direct-reconnect on
+             * next boot.  Stores the MOST RECENTLY connected device.
+             * Multi-device extension TODO: maintain an array of bonded
+             * addresses (covered by the LCD UI in #22). */
             if (le_tlv_impl) {
                 le_tlv_impl->store_tag(le_tlv_ctx, TLV_TAG_HOGD,
                                        (const uint8_t *)&le_remote,
                                        sizeof(le_remote));
             }
+            /* Resume scanning so the user can pair additional peripherals
+             * in the same session.  Each new pair gets its own
+             * hids_client_t slot from the pool (MAX_NR_HIDS_CLIENTS = 4)
+             * and routes reports through the same handler.  Existing
+             * connection stays up — BTstack maintains per-cid state. */
+            printf("[ble] resuming scan for additional peripherals\n");
+            le_start_scan();
             break;
         }
 

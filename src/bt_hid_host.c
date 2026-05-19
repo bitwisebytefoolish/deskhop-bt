@@ -29,13 +29,16 @@
 /* 1 KB is enough for a keyboard's HID report descriptor. */
 #define HID_DESCRIPTOR_STORAGE_LEN 1024
 
-/* Bluetooth Class of Device (CoD) masks for HID keyboards.
+/* Bluetooth Class of Device (CoD) masks for HID peripherals.
  * Major Service Class bit 13 = Limited Discoverable Mode (ignored here).
  * Major Device Class 0x05 = Peripheral.
- * Minor Device Class bit 6 = Keyboard. */
+ * Minor Device Class bit 6 = Keyboard, bit 7 = Pointing device.  Combo
+ * keyboard+mouse devices set both bits — they're accepted by either
+ * COD_MINOR_KEYBOARD or COD_MINOR_MOUSE match.                     */
 #define COD_MAJOR_PERIPHERAL   0x0500
 #define COD_MAJOR_MASK         0x1F00
 #define COD_MINOR_KEYBOARD     0x0040
+#define COD_MINOR_MOUSE        0x0080
 #define COD_MINOR_MASK         0x00FC
 
 /* Inquiry window: 4 × 1280 ms ≈ 5 s.  Long enough for most keyboards to
@@ -237,17 +240,22 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
              * HID host support, separate work).                          */
             bool is_peripheral = (cod & COD_MAJOR_MASK) == COD_MAJOR_PERIPHERAL;
             bool has_keyboard  = (cod & COD_MINOR_MASK) & COD_MINOR_KEYBOARD;
-            printf("[bt] inquiry result %02x:%02x:%02x:%02x:%02x:%02x cod=0x%06lx peripheral=%d keyboard=%d\n",
+            bool has_mouse     = (cod & COD_MINOR_MASK) & COD_MINOR_MOUSE;
+            bool is_hid_input  = is_peripheral && (has_keyboard || has_mouse);
+            printf("[bt] inquiry result %02x:%02x:%02x:%02x:%02x:%02x cod=0x%06lx peripheral=%d keyboard=%d mouse=%d\n",
                    addr[0], addr[1], addr[2], addr[3], addr[4], addr[5],
-                   (unsigned long)cod, is_peripheral, has_keyboard);
+                   (unsigned long)cod, is_peripheral, has_keyboard, has_mouse);
 
             if (g_keyboard_found)
                 break;
 
-            if (is_peripheral && has_keyboard) {
+            if (is_hid_input) {
                 bd_addr_copy(g_keyboard_addr, addr);
                 g_keyboard_found = true;
-                printf("[bt] -> MATCHED, stopping inquiry to connect\n");
+                printf("[bt] -> MATCHED (%s%s%s), stopping inquiry to connect\n",
+                       has_keyboard ? "keyboard" : "",
+                       (has_keyboard && has_mouse) ? "+" : "",
+                       has_mouse ? "mouse" : "");
                 set_stage(BT_STAGE_DISCOVERED);
                 gap_inquiry_stop();
             }
@@ -331,6 +339,14 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
                     g_descriptor_valid        = false;
                     *g_bt->keyboard_connected = true;
                     set_stage(BT_STAGE_CONNECTED);
+                    /* Resume inquiry so the user can pair additional
+                     * Classic peripherals (mouse + keyboard + numpad).
+                     * Each new pair gets its own connection slot from
+                     * MAX_NR_HID_HOST_CONNECTIONS (now 4 for #9).
+                     * The existing connection stays up; BTstack
+                     * maintains per-cid state for the new ones. */
+                    printf("[bt] resuming inquiry for additional peripherals\n");
+                    start_inquiry();
                     break;
                 }
 
@@ -383,8 +399,6 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
                 case HID_SUBEVENT_REPORT: {
                     if (!g_descriptor_valid)
                         break;
-                    if (!g_bt->process_report || !g_bt->kbd_iface)
-                        break;
 
                     const uint8_t *report = hid_subevent_report_get_report(packet);
                     uint16_t       len    = hid_subevent_report_get_report_len(packet);
@@ -397,16 +411,35 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
                      * expects the report to start at byte 0 with the report
                      * ID (or modifier byte for boot keyboards) — so we
                      * strip the 0xA1 here.  Reference: BTstack's
-                     * hid_host_demo.c → hid_host_handle_interrupt_report().
-                     * Without this, every keypress was being mis-parsed
-                     * (modifier=0xA1, keycode bytes shifted by one). */
+                     * hid_host_demo.c → hid_host_handle_interrupt_report(). */
                     if (len < 1 || report[0] != 0xA1)
                         break;
                     report++;
                     len--;
 
-                    g_bt->process_report((uint8_t *)report, (int)len,
-                                         g_bt->kbd_itf, g_bt->kbd_iface);
+                    /* Route by report length — in BOOT mode each device
+                     * type uses a fixed format:
+                     *   8 bytes (or 8+1 with report ID) → boot keyboard
+                     *   3, 4, or 5 bytes → boot mouse (buttons, x, y,
+                     *                       optionally wheel + pan)
+                     * Numpads advertise as keyboards (CoD mouse=0,
+                     * keyboard=1) and send 8-byte reports — fall through
+                     * to the keyboard path naturally.                  */
+                    bool kbd_like_len = (len == 8 || len == 9);
+                    bool mouse_like_len = (len == 3 || len == 4 || len == 5);
+                    if (kbd_like_len && g_bt->process_report && g_bt->kbd_iface) {
+                        g_bt->process_report((uint8_t *)report, (int)len,
+                                             g_bt->kbd_itf, g_bt->kbd_iface);
+                    } else if (mouse_like_len && g_bt->process_mouse_report && g_bt->mouse_iface) {
+                        g_bt->process_mouse_report((uint8_t *)report, (int)len,
+                                                   g_bt->mouse_itf, g_bt->mouse_iface);
+                    } else {
+                        /* Unknown report shape — log so we can diagnose
+                         * composite devices that mix unusual formats. */
+                        printf("[bt] unrecognised report len=%u byte0=0x%02x\n",
+                               len, len > 0 ? report[0] : 0);
+                        break;
+                    }
                     /* Latch INPUT stage on every report — also re-asserts it
                      * if we'd briefly transitioned elsewhere.  Cheap. */
                     set_stage(BT_STAGE_INPUT);

@@ -358,16 +358,26 @@ void initial_setup(device_t *state) {
     boot_crumb_set_phase(PHASE_BEFORE_BT_HID_INIT);
     static bt_hid_state_t  bt_hid_state;
     static hid_interface_t bt_kbd_iface;
+    static hid_interface_t bt_mouse_iface;
 
-    bt_hid_state.keyboard_connected = &state->keyboard_connected;
-    bt_hid_state.kbd_iface          = &bt_kbd_iface;
-    bt_hid_state.kbd_itf            = 0;
-    bt_hid_state.parse_descriptor   = parse_report_descriptor;
-    bt_hid_state.process_report     = process_keyboard_report;
-    bt_hid_state.blinks_left        = &state->blinks_left;
-    bt_hid_state.last_led_change    = &state->last_led_change;
-    bt_hid_state.onboard_led_state  = &state->onboard_led_state;
-    bt_hid_state.onboard_led_dirty  = &state->onboard_led_dirty;
+    bt_hid_state.keyboard_connected   = &state->keyboard_connected;
+    bt_hid_state.kbd_iface            = &bt_kbd_iface;
+    bt_hid_state.kbd_itf              = 0;
+    bt_hid_state.mouse_iface          = &bt_mouse_iface;
+    bt_hid_state.mouse_itf            = 1;
+    bt_hid_state.parse_descriptor     = parse_report_descriptor;
+    bt_hid_state.process_report       = process_keyboard_report;
+    bt_hid_state.process_mouse_report = process_mouse_report;
+    bt_hid_state.blinks_left          = &state->blinks_left;
+    bt_hid_state.last_led_change      = &state->last_led_change;
+    bt_hid_state.onboard_led_state    = &state->onboard_led_state;
+    bt_hid_state.onboard_led_dirty    = &state->onboard_led_dirty;
+
+    /* Mouse iface: same BOOT-mode shortcut.  extract_report_values in
+     * mouse.c casts raw_report straight to hid_mouse_report_t (5 bytes)
+     * when protocol == HID_PROTOCOL_BOOT, so no descriptor parsing
+     * needed on the BT path. */
+    bt_mouse_iface.protocol = 0; /* HID_PROTOCOL_BOOT */
 
     /* Pre-populate iface->protocol = 0 (HID_PROTOCOL_BOOT) so
      * extract_kbd_data dispatches to _extract_kbd_boot, the fixed-format
