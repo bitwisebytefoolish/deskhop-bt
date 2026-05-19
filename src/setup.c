@@ -28,6 +28,7 @@
 
 #ifdef DH_BT_HID_HOST_KBD
 #include "bt_hid_host.h"
+#include "bt_hid_host_le.h"   /* BLE peer of bt_hid_host — see #29 */
 #endif
 
 /* ================================================== *
@@ -378,6 +379,13 @@ void initial_setup(device_t *state) {
      * path is verified working for the BT path (#8 in the phase plan). */
     bt_kbd_iface.protocol = 0; /* HID_PROTOCOL_BOOT */
 
+    /* BLE HID host (HOGP) peer: must come BEFORE bt_hid_host_init so its
+     * SM + GATT-client handlers are registered when hci_power_control
+     * (called inside bt_hid_host_init) brings the radio up.  Both
+     * transports come online together and either can pair the keyboard
+     * — Classic-only (rare), BLE-only (8BitDo Retro and most modern
+     * wireless keyboards), or dual-mode (Keychron K7).  See issue #29. */
+    bt_hid_host_le_init(&bt_hid_state);
     bt_hid_host_init(&bt_hid_state);
     watchdog_update();
     boot_crumb_set_phase(PHASE_AFTER_BT_HID_INIT);
