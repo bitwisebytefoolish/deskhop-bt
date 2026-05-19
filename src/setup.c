@@ -16,6 +16,9 @@
 #include "main.h"
 #include "boot_crumb.h"
 
+#include <stdio.h>           /* printf — routed to stdio_uart on UART1 / GP4, see #26 */
+#include "pico/stdlib.h"     /* stdio_init_all() — re-call after set_sys_clock_khz */
+
 /* CYW43_WL_GPIO_LED_PIN is defined by the board header on boards that carry
    the CYW43439 module (Pico W, Pico 2 W). Same discriminator used in led.c.
    The C-level PICO_CYW43_SUPPORTED isn't a thing — it's a CMake-only var. */
@@ -241,6 +244,15 @@ void initial_setup(device_t *state) {
 
     /* PIO USB requires a clock multiple of 12 MHz, setting to 120 MHz */
     set_sys_clock_khz(120000, true);
+    /* Re-init stdio_uart: the UART divisor configured in main()'s call to
+     * stdio_init_all() was computed against the bootrom default clock
+     * (~150 MHz on RP2350).  After the clock change the divisor is wrong
+     * by ~25%, turning printf output into garbage.  stdio_uart_init
+     * (called transitively) recomputes the divisor for the new clock.
+     * Boot banner from main() already went out cleanly at the original
+     * clock; everything from here on uses the new (correct) divisor. */
+    stdio_init_all();
+    printf("[setup] sys_clock=120MHz, stdio_uart re-init\n");
     watchdog_update();
     boot_crumb_set_phase(PHASE_AFTER_SET_SYS_CLOCK);
 
