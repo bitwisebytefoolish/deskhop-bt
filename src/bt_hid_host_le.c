@@ -374,6 +374,20 @@ static void le_sm_packet_handler(uint8_t packet_type, uint16_t channel,
             proceed_to_service_discovery = true;
             break;
 
+        case SM_EVENT_IDENTITY_RESOLVING_STARTED:
+            /* Peer used a Resolvable Private Address; BTstack is trying
+             * to resolve it against our LE device DB.  Informational. */
+            printf("[ble] identity resolving started (peer using RPA)\n");
+            break;
+
+        case SM_EVENT_IDENTITY_RESOLVING_FAILED:
+            /* RPA could not be resolved — peer is unknown (no bond yet)
+             * or its IRK doesn't match anything in our DB.  Expected on
+             * first-pair; on subsequent pairs the IRK is stored and this
+             * event becomes SM_EVENT_IDENTITY_RESOLVING_SUCCEEDED. */
+            printf("[ble] identity resolving FAILED (no bond — first-pair path)\n");
+            break;
+
         default:
             /* Diagnostic: log any SM event we don't explicitly handle.
              * Helps identify cases like SM_EVENT_PAIRING_STARTED or
@@ -521,8 +535,16 @@ void bt_hid_host_le_init(bt_hid_state_t *bt_state) {
     sm_set_authentication_requirements(SM_AUTHREQ_BONDING);
 
     /* GATT client — required to discover services + characteristics on
-     * the peripheral and to subscribe for notifications. */
+     * the peripheral and to subscribe for notifications.  Set the
+     * required security level to LEVEL_2 (encrypted + bonded with no
+     * MITM, suitable for just-works pairing): BTstack will auto-initiate
+     * pairing whenever a GATT operation needs higher security than the
+     * current connection has.  This is the cleaner trigger than an
+     * explicit sm_request_pairing() call — the 8BitDo Retro doesn't
+     * respond to out-of-the-blue pairing requests, but it DOES respond
+     * to security elevation arising organically from a GATT op. */
     gatt_client_init();
+    gatt_client_set_required_security_level(LEVEL_2);
 
     /* Register for HCI / GAP events (BTSTACK_EVENT_STATE, advertising
      * reports, LE connection-complete, disconnection-complete). */
