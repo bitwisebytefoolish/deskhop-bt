@@ -82,10 +82,21 @@ static le_device_addr_t le_remote;
 static hci_con_handle_t le_connection_handle = HCI_CON_HANDLE_INVALID;
 
 /* hids_client state.  cid is the per-connection HID client ID; descriptor
- * storage holds the parsed REPORT_MAP from the peripheral (used by the
- * btstack_hid_parser when we extract keys from each report).  Size chosen
- * to fit a typical keyboard's HID descriptor (200–400 B) with some slack. */
-#define LE_HID_DESCRIPTOR_STORAGE_LEN  512
+ * storage holds the parsed REPORT_MAP from each connected peripheral —
+ * **shared across all hids_clients** (see hids_client_descriptor_storage_
+ * get_available_space() in BTstack).  Each entry is reserved at
+ * SERVICE_CONNECTED time, so with 4 simultaneous devices we need
+ * enough space for 4 worst-case descriptors.
+ *
+ * Typical sizes: simple mouse ~50–100 B, basic keyboard ~150 B, modern
+ * mechanical keyboard with media keys / multiple report IDs ~250–400 B,
+ * gaming keyboards with extras 400–500 B.  Sized at 2 KB to comfortably
+ * fit 4 medium-to-large descriptors (#9 #32: the 512 B size caused the
+ * 3rd device's descriptor to be truncated → btstack_hid_parser produced
+ * no fields → device "paired" but no input flowed).
+ *
+ * RAM cost: +1.5 KB; well within the 512 KB pico2_w budget. */
+#define LE_HID_DESCRIPTOR_STORAGE_LEN  2048
 static uint8_t  le_hid_descriptor_storage[LE_HID_DESCRIPTOR_STORAGE_LEN];
 static uint16_t le_hids_cid;
 
@@ -416,9 +427,20 @@ static void le_hids_client_event_handler(uint8_t packet_type, uint16_t channel,
                 break;
             }
             uint16_t connected_cid = gattservice_subevent_hid_service_connected_get_hids_cid(packet);
+            uint8_t  num_services  = gattservice_subevent_hid_service_connected_get_num_instances(packet);
             printf("[ble] HID service client CONNECTED (cid=0x%04x, %u services) — READY for input\n",
-                   connected_cid,
-                   gattservice_subevent_hid_service_connected_get_num_instances(packet));
+                   connected_cid, num_services);
+            /* Log the actual descriptor size received per service.  If it's
+             * 0 (or noticeably less than the device's real descriptor), the
+             * shared descriptor buffer was likely full — see comment on
+             * LE_HID_DESCRIPTOR_STORAGE_LEN.  An undersized descriptor
+             * passes through SERVICE_CONNECTED success but causes
+             * btstack_hid_parser to extract no fields → no input flows. */
+            for (uint8_t i = 0; i < num_services; i++) {
+                uint16_t desc_len =
+                    hids_client_descriptor_storage_get_descriptor_len(connected_cid, i);
+                printf("[ble]   svc=%u descriptor_len=%u bytes\n", i, desc_len);
+            }
             if (g_bt && g_bt->keyboard_connected)
                 *g_bt->keyboard_connected = true;
             /* Track this device in the active list so subsequent scans
