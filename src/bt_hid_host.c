@@ -228,18 +228,26 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
                 cod = hci_event_inquiry_result_with_rssi_get_class_of_device(packet);
             }
 
-            if (g_keyboard_found)
-                break;
-
+            /* Diagnostic: log EVERY inquiry result so the user can see what
+             * BT Classic devices are visible to the radio.  Helps diagnose
+             * "my keyboard is in pairing mode but the board never sees it"
+             * — either the device shows up here with an unexpected CoD
+             * (filter mismatch — easy fix) or it doesn't show up at all
+             * (BLE-only device — Classic inquiry can't see it; needs BLE
+             * HID host support, separate work).                          */
             bool is_peripheral = (cod & COD_MAJOR_MASK) == COD_MAJOR_PERIPHERAL;
             bool has_keyboard  = (cod & COD_MINOR_MASK) & COD_MINOR_KEYBOARD;
+            printf("[bt] inquiry result %02x:%02x:%02x:%02x:%02x:%02x cod=0x%06lx peripheral=%d keyboard=%d\n",
+                   addr[0], addr[1], addr[2], addr[3], addr[4], addr[5],
+                   (unsigned long)cod, is_peripheral, has_keyboard);
+
+            if (g_keyboard_found)
+                break;
 
             if (is_peripheral && has_keyboard) {
                 bd_addr_copy(g_keyboard_addr, addr);
                 g_keyboard_found = true;
-                printf("[bt] discovered keyboard %02x:%02x:%02x:%02x:%02x:%02x cod=0x%06lx\n",
-                       addr[0], addr[1], addr[2], addr[3], addr[4], addr[5],
-                       (unsigned long)cod);
+                printf("[bt] -> MATCHED, stopping inquiry to connect\n");
                 set_stage(BT_STAGE_DISCOVERED);
                 gap_inquiry_stop();
             }
