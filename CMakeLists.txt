@@ -199,6 +199,16 @@ target_compile_definitions(${binary}
     # PICO_CORE1_STACK_SIZE stays at 2KB (SCRATCH_X has 64 B of boot_crumb_data).
     PICO_STACK_SIZE=0x1000
     PICO_CORE1_STACK_SIZE=0x800
+    # Debug UART on UART1 / GP4 (TX) / GP5 (RX) @ 115200 8N1.
+    # UART0 is reserved for the cross-board protocol at 3.6864 Mbps —
+    # would look like binary garbage on a debug terminal.  pico_enable_
+    # stdio_uart below routes printf / log_error to this UART.  A USB-
+    # to-TTL adapter (e.g. DSD Tech SH-V09C in 3.3 V mode) on GP4 →
+    # adapter RX captures output.  See issue #26.
+    PICO_DEFAULT_UART=1
+    PICO_DEFAULT_UART_TX_PIN=4
+    PICO_DEFAULT_UART_RX_PIN=5
+    PICO_DEFAULT_UART_BAUD_RATE=115200
 )
 
 ## Support building a debug version
@@ -214,8 +224,12 @@ target_include_directories(${binary} PUBLIC ${COMMON_INCLUDES})
 target_link_libraries(${binary} PUBLIC ${COMMON_LINK_LIBRARIES})
 
 ## Configure Pico Library
+## stdio_usb stays disabled — would conflict with deskhop's USB device
+## descriptors (already a composite HID device with multiple interfaces).
+## stdio_uart routes printf + BTstack log_error to UART1 / GP4 / GP5 —
+## see PICO_DEFAULT_UART* defines above.  Issue #26.
 pico_enable_stdio_usb(${binary} 0)
-pico_enable_stdio_uart(${binary} 0)
+pico_enable_stdio_uart(${binary} 1)
 
 ## Custom flash layout linker script — per-platform variant so both the
 ## RP2040 and RP2350 builds get the deskhop sections (.section_disk,

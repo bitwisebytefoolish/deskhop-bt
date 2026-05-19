@@ -22,6 +22,7 @@
 #include "classic/hid_host.h"
 
 #include "pico/time.h"
+#include <stdio.h>   /* printf — routed to stdio_uart on UART1 / GP4, see #26 */
 
 #include "bt_hid_host.h"
 
@@ -169,6 +170,7 @@ static void start_inquiry(void) {
 static void connect_to_keyboard(void) {
     g_state = BT_STATE_CONNECTING;
     set_stage(BT_STAGE_CONNECTING);
+    printf("[bt] hid_host_connect(BOOT)\n");
     /* HID_PROTOCOL_MODE_BOOT (not REPORT): BTstack negotiates with the
      * keyboard to send fixed-format 8-byte boot reports (modifier byte +
      * reserved + 6 keycodes) — same shape as the original USB BIOS
@@ -182,6 +184,7 @@ static void connect_to_keyboard(void) {
                                       HID_PROTOCOL_MODE_BOOT,
                                       &g_hid_cid);
     if (status != ERROR_CODE_SUCCESS) {
+        printf("[bt] hid_host_connect SYNC FAIL status=0x%02x\n", status);
         g_status_code = status;  /* SYNCHRONOUS failure code */
         set_stage(BT_STAGE_FAILED);
         g_state = BT_STATE_IDLE;
@@ -206,6 +209,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
             if (btstack_event_state_get_state(packet) == HCI_STATE_WORKING) {
                 /* Radio up.  Kick off inquiry — keyboards in pairing mode
                  * are peripherals, they don't initiate; the host scans. */
+                printf("[bt] HCI_STATE_WORKING, starting inquiry\n");
                 set_stage(BT_STAGE_RADIO_UP);
                 start_inquiry();
             }
@@ -233,6 +237,9 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
             if (is_peripheral && has_keyboard) {
                 bd_addr_copy(g_keyboard_addr, addr);
                 g_keyboard_found = true;
+                printf("[bt] discovered keyboard %02x:%02x:%02x:%02x:%02x:%02x cod=0x%06lx\n",
+                       addr[0], addr[1], addr[2], addr[3], addr[4], addr[5],
+                       (unsigned long)cod);
                 set_stage(BT_STAGE_DISCOVERED);
                 gap_inquiry_stop();
             }
@@ -261,6 +268,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
         case HCI_EVENT_USER_CONFIRMATION_REQUEST: {
             bd_addr_t ssp_addr;
             hci_event_user_confirmation_request_get_bd_addr(packet, ssp_addr);
+            printf("[bt] SSP confirmation request — auto-accept\n");
             gap_ssp_confirmation_response(ssp_addr);
             break;
         }
@@ -269,6 +277,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
         case HCI_EVENT_PIN_CODE_REQUEST: {
             bd_addr_t pin_addr;
             hci_event_pin_code_request_get_bd_addr(packet, pin_addr);
+            printf("[bt] PIN code request — replying 0000\n");
             gap_pin_code_response(pin_addr, "0000");
             break;
         }
@@ -285,12 +294,14 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
                 case HID_SUBEVENT_CONNECTION_OPENED: {
                     uint8_t status = hid_subevent_connection_opened_get_status(packet);
                     if (status != ERROR_CODE_SUCCESS) {
+                        printf("[bt] HID_SUBEVENT_CONNECTION_OPENED FAIL status=0x%02x\n", status);
                         g_status_code = status; /* ASYNC failure code */
                         set_stage(BT_STAGE_FAILED);
                         g_state = BT_STATE_IDLE;
                         start_inquiry();
                         break;
                     }
+                    printf("[bt] HID_SUBEVENT_CONNECTION_OPENED success\n");
                     g_hid_cid                 = hid_subevent_connection_opened_get_hid_cid(packet);
                     g_state                   = BT_STATE_CONNECTED;
                     g_descriptor_valid        = false;
@@ -300,6 +311,7 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
                 }
 
                 case HID_SUBEVENT_CONNECTION_CLOSED:
+                    printf("[bt] HID_SUBEVENT_CONNECTION_CLOSED — restarting inquiry\n");
                     g_state                   = BT_STATE_IDLE;
                     g_descriptor_valid        = false;
                     *g_bt->keyboard_connected = false;
@@ -309,12 +321,14 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
                 case HID_SUBEVENT_DESCRIPTOR_AVAILABLE: {
                     uint8_t status = hid_subevent_descriptor_available_get_status(packet);
                     if (status != ERROR_CODE_SUCCESS) {
+                        printf("[bt] HID_SUBEVENT_DESCRIPTOR_AVAILABLE FAIL status=0x%02x\n", status);
                         /* Surface the descriptor fetch error via the FAILED
                          * stage + status code rather than silently dropping. */
                         g_status_code = status;
                         set_stage(BT_STAGE_FAILED);
                         break;
                     }
+                    printf("[bt] HID descriptor parsed\n");
                     if (!g_bt->parse_descriptor || !g_bt->kbd_iface)
                         break;
 
