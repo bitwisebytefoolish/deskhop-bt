@@ -102,6 +102,60 @@ static btstack_packet_callback_registration_t le_sm_cb;
 static const btstack_tlv_t *le_tlv_impl;
 static void                *le_tlv_ctx;
 
+/* Currently-connected device table.  Populated by GATTSERVICE_SUBEVENT_
+ * HID_SERVICE_CONNECTED and drained by GATTSERVICE_SUBEVENT_HID_SERVICE_
+ * DISCONNECTED.  Filters scan results to skip advertisers we already
+ * have an open hids_client connection to.  Without this filter, our
+ * scan-resume-after-pair loop would re-discover the device we just
+ * paired and issue another gap_connect to it, which BTstack handles by
+ * tearing down the existing connection — observed in #9 v1 hardware
+ * test as "pairing the 3rd device breaks the 1st and 2nd".
+ *
+ * Sized 1:1 with the hids_client pool — no point tracking more than
+ * we can host simultaneously.                                       */
+typedef struct {
+    bd_addr_t addr;
+    uint16_t  hids_cid;
+} le_active_entry_t;
+static le_active_entry_t le_active[MAX_NR_HIDS_CLIENTS];
+static int               le_num_active;
+
+static bool le_addr_is_active(const bd_addr_t addr) {
+    for (int i = 0; i < le_num_active; i++) {
+        if (memcmp(le_active[i].addr, addr, sizeof(bd_addr_t)) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void le_add_active(const bd_addr_t addr, uint16_t cid) {
+    if (le_num_active >= MAX_NR_HIDS_CLIENTS) {
+        printf("[ble] active-device table full (%d slots) — refusing to add %02x:%02x:%02x:%02x:%02x:%02x\n",
+               MAX_NR_HIDS_CLIENTS,
+               addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+        return;
+    }
+    bd_addr_copy(le_active[le_num_active].addr, addr);
+    le_active[le_num_active].hids_cid = cid;
+    le_num_active++;
+    printf("[ble] active devices: %d/%d (added cid=0x%04x)\n",
+           le_num_active, MAX_NR_HIDS_CLIENTS, cid);
+}
+
+static void le_remove_active_by_cid(uint16_t cid) {
+    for (int i = 0; i < le_num_active; i++) {
+        if (le_active[i].hids_cid != cid)
+            continue;
+        /* Compact: move last entry into the freed slot. */
+        if (i != le_num_active - 1)
+            le_active[i] = le_active[le_num_active - 1];
+        le_num_active--;
+        printf("[ble] active devices: %d/%d (removed cid=0x%04x)\n",
+               le_num_active, MAX_NR_HIDS_CLIENTS, cid);
+        return;
+    }
+}
+
 /* ---- forward declarations ----------------------------------------- */
 
 static void le_start_scan(void);
@@ -353,10 +407,16 @@ static void le_hids_client_event_handler(uint8_t packet_type, uint16_t channel,
                 le_handle_outgoing_connection_error();
                 break;
             }
-            printf("[ble] HID service client CONNECTED (%u services) — READY for input\n",
+            uint16_t connected_cid = gattservice_subevent_hid_service_connected_get_hids_cid(packet);
+            printf("[ble] HID service client CONNECTED (cid=0x%04x, %u services) — READY for input\n",
+                   connected_cid,
                    gattservice_subevent_hid_service_connected_get_num_instances(packet));
             if (g_bt && g_bt->keyboard_connected)
                 *g_bt->keyboard_connected = true;
+            /* Track this device in the active list so subsequent scans
+             * don't try to reconnect to it (which would tear down this
+             * very connection). */
+            le_add_active(le_remote.addr, connected_cid);
             /* Persist this device address for fast direct-reconnect on
              * next boot.  Stores the MOST RECENTLY connected device.
              * Multi-device extension TODO: maintain an array of bonded
@@ -367,20 +427,29 @@ static void le_hids_client_event_handler(uint8_t packet_type, uint16_t channel,
                                        sizeof(le_remote));
             }
             /* Resume scanning so the user can pair additional peripherals
-             * in the same session.  Each new pair gets its own
-             * hids_client_t slot from the pool (MAX_NR_HIDS_CLIENTS = 4)
-             * and routes reports through the same handler.  Existing
-             * connection stays up — BTstack maintains per-cid state. */
-            printf("[ble] resuming scan for additional peripherals\n");
-            le_start_scan();
+             * in the same session, but only if there are slots left.
+             * Each new pair gets its own hids_client_t from the pool. */
+            if (le_num_active < MAX_NR_HIDS_CLIENTS) {
+                printf("[ble] resuming scan for additional peripherals\n");
+                le_start_scan();
+            } else {
+                printf("[ble] all %d hids_client slots in use — not resuming scan\n",
+                       MAX_NR_HIDS_CLIENTS);
+                le_state = LE_READY;
+            }
             break;
         }
 
-        case GATTSERVICE_SUBEVENT_HID_SERVICE_DISCONNECTED:
-            printf("[ble] HID service client disconnected\n");
-            /* The LE link teardown follows; HCI_EVENT_DISCONNECTION_COMPLETE
-             * in our HCI handler then resets state and re-scans. */
+        case GATTSERVICE_SUBEVENT_HID_SERVICE_DISCONNECTED: {
+            uint16_t disc_cid = gattservice_subevent_hid_service_disconnected_get_hids_cid(packet);
+            printf("[ble] HID service client disconnected (cid=0x%04x)\n", disc_cid);
+            le_remove_active_by_cid(disc_cid);
+            /* If we'd capped scanning because slots were full, restart
+             * it now that one freed up. */
+            if (le_state != LE_W4_HID_DEVICE_FOUND && le_state != LE_W4_CONNECTED)
+                le_start_scan();
             break;
+        }
 
         case GATTSERVICE_SUBEVENT_HID_REPORT:
             le_handle_input_report(
@@ -519,8 +588,24 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
                 break;
             if (!le_adv_contains_hid_service(packet))
                 break;
+            bd_addr_t adv_addr;
+            gap_event_advertising_report_get_address(packet, adv_addr);
+            /* Already connected?  Skip — re-connecting to the same
+             * peripheral while a connection is open causes BTstack to
+             * tear down the existing connection (observed in #9 v1
+             * hardware test: pairing the 3rd device disconnected the
+             * 1st two). */
+            if (le_addr_is_active(adv_addr))
+                break;
+            /* All hids_client slots in use?  Skip — no point connecting
+             * if we can't host the HID service client. */
+            if (le_num_active >= MAX_NR_HIDS_CLIENTS) {
+                printf("[ble] %d/%d devices active — ignoring further HID advs until one disconnects\n",
+                       le_num_active, MAX_NR_HIDS_CLIENTS);
+                break;
+            }
             gap_stop_scan();
-            gap_event_advertising_report_get_address(packet, le_remote.addr);
+            bd_addr_copy(le_remote.addr, adv_addr);
             le_remote.addr_type = gap_event_advertising_report_get_address_type(packet);
             printf("[ble] HID adv from %02x:%02x:%02x:%02x:%02x:%02x (addr_type=%u)\n",
                    le_remote.addr[0], le_remote.addr[1], le_remote.addr[2],
