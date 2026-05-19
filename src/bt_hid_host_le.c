@@ -287,7 +287,7 @@ static void le_kick_hids_client(void) {
  * keyboard-only device sends nothing to the mouse pipeline; a mouse-only
  * device sends nothing to the keyboard pipeline.  No per-device routing
  * table needed.                                                          */
-static void le_handle_input_report(uint8_t service_index,
+static void le_handle_input_report(uint16_t hids_cid, uint8_t service_index,
                                    const uint8_t *report, uint16_t report_len) {
     if (report_len < 1)
         return;
@@ -305,11 +305,19 @@ static void le_handle_input_report(uint8_t service_index,
     bool    mouse_seen      = false;
     int32_t mouse_dx = 0, mouse_dy = 0, mouse_wheel = 0, mouse_pan = 0;
 
+    /* CRITICAL: parse the report against THIS device's descriptor, not
+     * the globally most-recently-paired device's.  Each connected BLE
+     * peripheral has its own descriptor stored in hids_client's storage
+     * keyed by cid.  Using le_hids_cid (which was the last cid set by
+     * hids_client_connect) would parse every incoming report against the
+     * wrong descriptor — observed in #9 multi-device test as "mouse stops
+     * working when keyboard connects" (mouse reports parsed with kbd
+     * descriptor produced garbage). */
     btstack_hid_parser_t parser;
     btstack_hid_parser_init(
         &parser,
-        hids_client_descriptor_storage_get_descriptor_data(le_hids_cid, service_index),
-        hids_client_descriptor_storage_get_descriptor_len(le_hids_cid, service_index),
+        hids_client_descriptor_storage_get_descriptor_data(hids_cid, service_index),
+        hids_client_descriptor_storage_get_descriptor_len(hids_cid, service_index),
         HID_REPORT_TYPE_INPUT, report, report_len);
 
     while (btstack_hid_parser_has_more(&parser)) {
@@ -453,6 +461,7 @@ static void le_hids_client_event_handler(uint8_t packet_type, uint16_t channel,
 
         case GATTSERVICE_SUBEVENT_HID_REPORT:
             le_handle_input_report(
+                gattservice_subevent_hid_report_get_hids_cid(packet),
                 gattservice_subevent_hid_report_get_service_index(packet),
                 gattservice_subevent_hid_report_get_report(packet),
                 gattservice_subevent_hid_report_get_report_len(packet));
