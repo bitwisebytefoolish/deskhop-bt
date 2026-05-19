@@ -303,6 +303,22 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
                     uint8_t status = hid_subevent_connection_opened_get_status(packet);
                     if (status != ERROR_CODE_SUCCESS) {
                         printf("[bt] HID_SUBEVENT_CONNECTION_OPENED FAIL status=0x%02x\n", status);
+                        /* Auto-recovery for stale link keys.  Status 0x66 =
+                         * L2CAP_CONNECTION_RESPONSE_RESULT_REFUSED_SECURITY
+                         * means our stored link key doesn't match what the
+                         * peer has.  Happens when the user resets the
+                         * keyboard's bond on its side (e.g. K7's Fn+J+Z
+                         * factory reset) while we still have the old key.
+                         * Drop our copy so the next connect attempt does
+                         * a fresh pairing exchange instead of trying to
+                         * encrypt with a key the peer no longer recognises. */
+                        if (status == L2CAP_CONNECTION_RESPONSE_RESULT_REFUSED_SECURITY) {
+                            printf("[bt] link-key mismatch — dropping stored key for %02x:%02x:%02x:%02x:%02x:%02x\n",
+                                   g_keyboard_addr[0], g_keyboard_addr[1],
+                                   g_keyboard_addr[2], g_keyboard_addr[3],
+                                   g_keyboard_addr[4], g_keyboard_addr[5]);
+                            gap_drop_link_key_for_bd_addr(g_keyboard_addr);
+                        }
                         g_status_code = status; /* ASYNC failure code */
                         set_stage(BT_STAGE_FAILED);
                         g_state = BT_STATE_IDLE;
