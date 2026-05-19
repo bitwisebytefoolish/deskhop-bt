@@ -484,13 +484,19 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
 void bt_hid_host_le_init(bt_hid_state_t *bt_state) {
     g_bt = bt_state;
 
-    /* Security Manager: just-works pairing, no display, no input, LE
-     * Secure Connections required (most 2018+ BLE peripherals refuse
-     * legacy pairing).  Bonding ON so the LTK is stored for fast
-     * re-encryption on reconnect. */
+    /* Security Manager: just-works pairing, no display, no input.
+     * AuthReq is intentionally permissive — only request BONDING (so the
+     * LTK is stored for fast re-encryption on reconnect), and let the
+     * peripheral dictate the rest.  Initial implementation requested
+     * SM_AUTHREQ_SECURE_CONNECTION too, but the 8BitDo Retro Mechanical
+     * Keyboard timed out during pairing under that policy — likely a
+     * negotiation mismatch.  Removing the SC requirement makes us
+     * compatible with both legacy and SC-capable peripherals; the
+     * peripheral's own AuthReq still applies, so SC happens when both
+     * sides support it (which is usually the case for 2018+ devices). */
     sm_init();
     sm_set_io_capabilities(IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
-    sm_set_authentication_requirements(SM_AUTHREQ_SECURE_CONNECTION | SM_AUTHREQ_BONDING);
+    sm_set_authentication_requirements(SM_AUTHREQ_BONDING);
 
     /* GATT client — required to discover services + characteristics on
      * the peripheral and to subscribe for notifications. */
