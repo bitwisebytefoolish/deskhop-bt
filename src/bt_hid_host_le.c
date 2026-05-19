@@ -362,6 +362,19 @@ static void le_sm_packet_handler(uint8_t packet_type, uint16_t channel,
             printf("[ble] re-encryption started\n");
             break;
 
+        case SM_EVENT_PAIRING_STARTED:
+            /* First-pair path: the SMP exchange has begun. */
+            printf("[ble] pairing started\n");
+            break;
+
+        case SM_EVENT_IDENTITY_CREATED:
+            /* BTstack just stored an identity entry (IRK + identity
+             * address) for this peer in le_device_db.  This is what
+             * lets future bonded-reconnects resolve the peer's
+             * Resolvable Private Address back to the same device. */
+            printf("[ble] identity created (peer is now bonded)\n");
+            break;
+
         case SM_EVENT_REENCRYPTION_COMPLETE:
             printf("[ble] re-encryption complete — using stored bond\n");
             security_up = true;
