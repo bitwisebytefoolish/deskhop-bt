@@ -51,37 +51,38 @@
 #define HCI_INCOMING_PRE_BUFFER_SIZE  6
 #define HCI_OUTGOING_PRE_BUFFER_SIZE  4
 
-/* 2: one Classic + one BLE link can coexist.  Bumped from 1 when BLE
- * was added.  Static memory cost: ~2 KB per slot. */
-#define MAX_NR_HCI_CONNECTIONS        2
+/* Bumped to 4 for #9 multi-device work: support keyboard + mouse +
+ * numpad + spare slot simultaneously.  Mix of Classic and BLE.
+ * Static memory cost: ~2 KB per slot. */
+#define MAX_NR_HCI_CONNECTIONS        4
 #define MAX_NR_L2CAP_SERVICES         3    /* HID-Control, HID-Interrupt, SDP */
-/* Classic L2CAP channels (HID Control + HID Interrupt + SDP) plus
- * a BLE pseudo-channel for ATT — bumped from 4 to 6 for BLE. */
-#define MAX_NR_L2CAP_CHANNELS         6
+/* Classic uses 2 channels per HID device (Control + Interrupt) plus 1
+ * shared SDP.  4 Classic devices = 9 channels.  Plus per-BLE-link ATT
+ * pseudo-channel.  Sized at 12 for headroom. */
+#define MAX_NR_L2CAP_CHANNELS         12
 #define MAX_NR_RFCOMM_MULTIPLEXERS    0
 #define MAX_NR_RFCOMM_SERVICES        0
 #define MAX_NR_RFCOMM_CHANNELS        0
 
 /* ---- BLE pools ---------------------------------------------------- */
 
-/* One outgoing GATT client (we connect to one peripheral at a time). */
-#define MAX_NR_GATT_CLIENTS           1
+/* Per-link GATT client.  4 to match MAX_NR_HCI_CONNECTIONS. */
+#define MAX_NR_GATT_CLIENTS           4
 
-/* HIDS (HID Service) client pool.  hids_client_connect() pulls a
- * hids_client_t from a static array sized by this define; undefined
- * defaults to 0 → empty pool → hids_client_connect returns
- * BTSTACK_MEMORY_ALLOC_FAILED (0x56) synchronously.  Same family of
- * bug as missing MAX_NR_HID_HOST_CONNECTIONS on the Classic side (#6).
- * Sized at 2 to tolerate transient overlap during reconnect, matching
- * MAX_NR_HID_HOST_CONNECTIONS. */
-#define MAX_NR_HIDS_CLIENTS           2
+/* HIDS (HID Service) client pool.  Sized at 4 for the same reason as
+ * HID_HOST_CONNECTIONS below.  Important: undefined defaults to 0 →
+ * empty pool → hids_client_connect returns BTSTACK_MEMORY_ALLOC_FAILED
+ * (0x56) synchronously (same family of bug as #6's
+ * MAX_NR_HID_HOST_CONNECTIONS bug). */
+#define MAX_NR_HIDS_CLIENTS           4
 
-/* BLE bond DB: keep parity with Classic side; 4 slots is plenty for
- * the deskhop use case (one keyboard, room for spares). */
-#define MAX_NR_LE_DEVICE_DB_ENTRIES   4
+/* BLE bond DB: keep parity with Classic NVM_NUM_LINK_KEYS.  8 slots
+ * gives room for both transports' bonds without collisions. */
+#define MAX_NR_LE_DEVICE_DB_ENTRIES   8
 
-/* In-flight Security Manager transactions.  Default 3 is conservative. */
-#define MAX_NR_SM_LOOKUP_ENTRIES      3
+/* In-flight Security Manager transactions.  Default 3 is conservative;
+ * bumped to 4 to match concurrent connect attempts. */
+#define MAX_NR_SM_LOOKUP_ENTRIES      4
 
 /* Local ATT database size (peripheral-side, advertised services).  We
  * don't host any GATT services — we're a central — but ATT_DB_UTIL
@@ -97,17 +98,16 @@
  * every connect attempt returns 0x56.  THIS was the silent failure that
  * caused every pairing attempt to fail synchronously.
  *
- * Sized at 2 (not 1) to tolerate transient overlap: when the BT link
- * drops and our CONNECTION_CLOSED handler immediately restarts inquiry
- * and re-issues hid_host_connect, BTstack may not yet have freed the
- * outgoing connection slot.  A pool of 1 would then return 0x56; a pool
- * of 2 lets the new connect proceed without waiting for cleanup.       */
-#define MAX_NR_HID_HOST_CONNECTIONS   2
+ * Bumped to 4 for #9 multi-device.  Allows 3 simultaneous Classic HID
+ * devices (keyboard + mouse + numpad) plus 1 transient overlap slot
+ * for the brief window during reconnect when an old connection isn't
+ * yet freed but a new one is being attempted. */
+#define MAX_NR_HID_HOST_CONNECTIONS   4
 
 /* ---- Bond storage (TLV via pico_btstack_flash_bank) --------------- */
 
-#define NVM_NUM_LINK_KEYS             4
-#define NVM_NUM_DEVICE_DB_ENTRIES     4
+#define NVM_NUM_LINK_KEYS             8
+#define NVM_NUM_DEVICE_DB_ENTRIES     8
 
 /* Place the BTstack TLV bank 12 KB from the end of flash, directly below
  * FLASH_CONFIG (4 KB).  pico_btstack_flash_bank's default would use the
