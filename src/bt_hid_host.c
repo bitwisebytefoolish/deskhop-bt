@@ -344,10 +344,24 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
 
                 case HID_SUBEVENT_DESCRIPTOR_AVAILABLE: {
                     uint8_t status = hid_subevent_descriptor_available_get_status(packet);
+                    /* BTstack's hid_host_connect(BOOT) deliberately skips the
+                     * SDP query path (hid_host.c line ~1291), so
+                     * connection->hid_descriptor_status stays at its
+                     * initial value of ERROR_CODE_UNSUPPORTED_FEATURE_OR_
+                     * PARAMETER_VALUE (0x11) and that's the status that
+                     * propagates here.  It's not a failure — boot
+                     * keyboard reports are a fixed 8-byte format and need
+                     * no descriptor for parsing.  Since the Classic path
+                     * is universally BOOT mode (set in setup.c), treat
+                     * 0x11 as the expected outcome on this transport. */
+                    if (status == ERROR_CODE_UNSUPPORTED_FEATURE_OR_PARAMETER_VALUE) {
+                        printf("[bt] HID descriptor unavailable (BTstack skips SDP in BOOT mode — expected, no parse needed)\n");
+                        g_descriptor_valid = true;
+                        set_stage(BT_STAGE_DESCRIPTOR);
+                        break;
+                    }
                     if (status != ERROR_CODE_SUCCESS) {
                         printf("[bt] HID_SUBEVENT_DESCRIPTOR_AVAILABLE FAIL status=0x%02x\n", status);
-                        /* Surface the descriptor fetch error via the FAILED
-                         * stage + status code rather than silently dropping. */
                         g_status_code = status;
                         set_stage(BT_STAGE_FAILED);
                         break;
