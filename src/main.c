@@ -11,6 +11,9 @@
 #include "main.h"
 #include "boot_crumb.h"
 
+#include <stdio.h>           /* printf via pico_stdio_uart — see #26 */
+#include "pico/stdlib.h"     /* stdio_init_all() */
+
 /* Override the SDK's weak isr_hardfault (bkpt → LOCKUP) so we can stamp
  * a crumb before the watchdog fires.  Must NOT be naked — we need the
  * compiler to emit a proper stack frame so boot_crumb_set_phase works. */
@@ -39,6 +42,22 @@ int main(void) {
     boot_crumb_check_and_maybe_reenter_bootsel();
     boot_crumb_data[5] = 0xBBBBBBBBu;
     boot_crumb_set_phase(PHASE_ENTER_MAIN);
+
+    /* Bring up stdio_uart (UART1 / GP4 / 115200) as early as possible so
+     * any subsequent printf or BTstack log_error reaches the wire before
+     * slower init steps could potentially fail silently.  See issue #26.
+     * Returns true if at least one stdio driver initialised — we don't
+     * gate on this; if the UART isn't physically connected, prints fan
+     * out to nowhere harmlessly. */
+    stdio_init_all();
+    printf("\n\n=== deskhop-bt boot (FW %u.%u, role=%s) ===\n",
+           VERSION_MAJOR, VERSION_MINOR,
+#ifdef DH_BT_HID_HOST_KBD
+           "A (BT-host)"
+#else
+           "B (output)"
+#endif
+    );
 
     static task_t tasks_core0[] = {
         [0] = {.exec = &usb_device_task,          .frequency = _TOP()},      // .-> USB device task, needs to run as often as possible
