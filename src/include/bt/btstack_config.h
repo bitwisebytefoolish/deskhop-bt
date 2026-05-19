@@ -67,6 +67,15 @@
 /* One outgoing GATT client (we connect to one peripheral at a time). */
 #define MAX_NR_GATT_CLIENTS           1
 
+/* HIDS (HID Service) client pool.  hids_client_connect() pulls a
+ * hids_client_t from a static array sized by this define; undefined
+ * defaults to 0 → empty pool → hids_client_connect returns
+ * BTSTACK_MEMORY_ALLOC_FAILED (0x56) synchronously.  Same family of
+ * bug as missing MAX_NR_HID_HOST_CONNECTIONS on the Classic side (#6).
+ * Sized at 2 to tolerate transient overlap during reconnect, matching
+ * MAX_NR_HID_HOST_CONNECTIONS. */
+#define MAX_NR_HIDS_CLIENTS           2
+
 /* BLE bond DB: keep parity with Classic side; 4 slots is plenty for
  * the deskhop use case (one keyboard, room for spares). */
 #define MAX_NR_LE_DEVICE_DB_ENTRIES   4
