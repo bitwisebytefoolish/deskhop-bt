@@ -292,6 +292,23 @@ static void le_handle_input_report(uint16_t hids_cid, uint8_t service_index,
     if (report_len < 1)
         return;
 
+    /* Diagnostic dump: log every notification with its cid and first
+     * few bytes so we can tell whether reports are arriving from each
+     * device.  Used to diagnose #9 hardware test where the numpad
+     * (cid=0x0003) was paired but produced no output — needed to
+     * verify whether reports were arriving at all and what their
+     * shape was.  REMOVE once stable. */
+    printf("[ble] notify cid=0x%04x svc=%u len=%u [%02x %02x %02x %02x %02x %02x %02x %02x]\n",
+           hids_cid, service_index, report_len,
+           report_len > 0 ? report[0] : 0,
+           report_len > 1 ? report[1] : 0,
+           report_len > 2 ? report[2] : 0,
+           report_len > 3 ? report[3] : 0,
+           report_len > 4 ? report[4] : 0,
+           report_len > 5 ? report[5] : 0,
+           report_len > 6 ? report[6] : 0,
+           report_len > 7 ? report[7] : 0);
+
     /* Boot-keyboard layout (8 bytes): [mod][rsvd][k1..k6] */
     uint8_t kbd_report[8]  = {0};
     bool    kbd_seen       = false;
@@ -324,6 +341,12 @@ static void le_handle_input_report(uint16_t hids_cid, uint8_t service_index,
         uint16_t usage_page, usage;
         int32_t  value;
         btstack_hid_parser_get_field(&parser, &usage_page, &usage, &value);
+
+        /* Only log non-zero values to keep the spam down — every
+         * boot mouse report has 4–5 zero-valued fields. */
+        if (value != 0)
+            printf("[ble]   field page=0x%04x usage=0x%04x val=%ld\n",
+                   usage_page, usage, (long)value);
 
         switch (usage_page) {
             case 0x07: /* Keyboard / Keypad */
