@@ -374,15 +374,26 @@ static void le_sm_packet_handler(uint8_t packet_type, uint16_t channel,
             proceed_to_service_discovery = true;
             break;
 
-        default: break;
+        default:
+            /* Diagnostic: log any SM event we don't explicitly handle.
+             * Helps identify cases like SM_EVENT_PAIRING_STARTED or
+             * passkey display where the peer expects us to do something
+             * we're not.  Remove or gate behind a debug flag once the
+             * SM exchange is stable on the K7 + 8BitDo. */
+            printf("[ble] unhandled SM event type=0x%02x\n",
+                   hci_event_packet_get_type(packet));
+            break;
     }
 
+    /* No explicit re-issue of GATT discovery here.  Since we removed the
+     * sm_request_pairing() call on LE_CONNECTION_COMPLETE, GATT discovery
+     * starts immediately and BTstack pauses it internally if/when the
+     * peripheral demands encryption.  Once SM_EVENT_PAIRING_COMPLETE or
+     * SM_EVENT_REENCRYPTION_COMPLETE fires, BTstack auto-resumes the
+     * paused GATT query — we don't need to do anything.  The
+     * `proceed_to_service_discovery` flag becomes a pure log assertion. */
     if (proceed_to_service_discovery) {
-        printf("[ble] discovering HID primary service\n");
-        le_state = LE_W4_HID_SERVICE_FOUND;
-        gatt_client_discover_primary_services_by_uuid16(
-            &le_gatt_client_event_handler, le_connection_handle,
-            ORG_BLUETOOTH_SERVICE_HUMAN_INTERFACE_DEVICE);
+        printf("[ble] security elevated — pending GATT query should resume\n");
     }
 }
 
@@ -440,10 +451,21 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
             btstack_run_loop_remove_timer(&le_connection_timer);
             le_connection_handle =
                 gap_subevent_le_connection_complete_get_connection_handle(packet);
-            printf("[ble] LE connection complete (handle 0x%04x) — requesting pairing\n",
+            /* Skip the explicit sm_request_pairing() — earlier attempt timed
+             * out with the 8BitDo Retro (no SM events ever arrived).  Some
+             * BLE peripherals only respond to security elevation when it's
+             * triggered organically by a GATT operation that requires it.
+             * Jump straight to GATT service discovery instead; BTstack
+             * automatically initiates pairing when the peripheral rejects
+             * an unauthenticated read with "Insufficient Authentication".
+             * SM event handler still catches the resulting just-works /
+             * numeric-comparison / pairing-complete events. */
+            printf("[ble] LE connection complete (handle 0x%04x) — discovering HID service (security follows automatically if required)\n",
                    le_connection_handle);
-            le_state = LE_W4_ENCRYPTED;
-            sm_request_pairing(le_connection_handle);
+            le_state = LE_W4_HID_SERVICE_FOUND;
+            gatt_client_discover_primary_services_by_uuid16(
+                &le_gatt_client_event_handler, le_connection_handle,
+                ORG_BLUETOOTH_SERVICE_HUMAN_INTERFACE_DEVICE);
             break;
 
         case HCI_EVENT_DISCONNECTION_COMPLETE:
