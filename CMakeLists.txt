@@ -155,9 +155,13 @@ if(PICO_CYW43_SUPPORTED)
         ## flash storage. Pulls in pico_btstack_base, pico_btstack_flash_bank,
         ## pico_btstack_run_loop_async_context, and pico_btstack_hci_transport_cyw43.
         ## pico_btstack_classic adds hid_host.c, l2cap, sdp, and ssp on top.
+        ## pico_btstack_ble adds gatt_client.c, sm.c, le_device_db_tlv.c, and
+        ## the HIDS GATT-service client — required for BLE HID host (#29).
+        ## Both transports run simultaneously on the shared CYW43 radio.
         list(APPEND COMMON_LINK_LIBRARIES
             pico_btstack_cyw43
             pico_btstack_classic
+            pico_btstack_ble
         )
         ## btstack_config.h is in src/include/bt/ so BTstack finds it.
         list(APPEND COMMON_INCLUDES ${CMAKE_SOURCE_DIR}/src/include/bt)
@@ -178,7 +182,10 @@ add_executable(${binary} ${DISK_ASM})
 
 target_sources(${binary} PUBLIC ${COMMON_SOURCES})
 if(DH_BT_HID_HOST_KBD)
-    target_sources(${binary} PRIVATE ${SRC_DIR}/bt_hid_host.c)
+    target_sources(${binary} PRIVATE
+        ${SRC_DIR}/bt_hid_host.c
+        ${SRC_DIR}/bt_hid_host_le.c
+    )
 endif()
 target_compile_definitions(${binary}
     PRIVATE

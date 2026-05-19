@@ -303,6 +303,22 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
                     uint8_t status = hid_subevent_connection_opened_get_status(packet);
                     if (status != ERROR_CODE_SUCCESS) {
                         printf("[bt] HID_SUBEVENT_CONNECTION_OPENED FAIL status=0x%02x\n", status);
+                        /* Auto-recovery for stale link keys.  Status 0x66 =
+                         * L2CAP_CONNECTION_RESPONSE_RESULT_REFUSED_SECURITY
+                         * means our stored link key doesn't match what the
+                         * peer has.  Happens when the user resets the
+                         * keyboard's bond on its side (e.g. K7's Fn+J+Z
+                         * factory reset) while we still have the old key.
+                         * Drop our copy so the next connect attempt does
+                         * a fresh pairing exchange instead of trying to
+                         * encrypt with a key the peer no longer recognises. */
+                        if (status == L2CAP_CONNECTION_RESPONSE_RESULT_REFUSED_SECURITY) {
+                            printf("[bt] link-key mismatch — dropping stored key for %02x:%02x:%02x:%02x:%02x:%02x\n",
+                                   g_keyboard_addr[0], g_keyboard_addr[1],
+                                   g_keyboard_addr[2], g_keyboard_addr[3],
+                                   g_keyboard_addr[4], g_keyboard_addr[5]);
+                            gap_drop_link_key_for_bd_addr(g_keyboard_addr);
+                        }
                         g_status_code = status; /* ASYNC failure code */
                         set_stage(BT_STAGE_FAILED);
                         g_state = BT_STATE_IDLE;
@@ -328,10 +344,24 @@ static void packet_handler(uint8_t packet_type, uint16_t channel,
 
                 case HID_SUBEVENT_DESCRIPTOR_AVAILABLE: {
                     uint8_t status = hid_subevent_descriptor_available_get_status(packet);
+                    /* BTstack's hid_host_connect(BOOT) deliberately skips the
+                     * SDP query path (hid_host.c line ~1291), so
+                     * connection->hid_descriptor_status stays at its
+                     * initial value of ERROR_CODE_UNSUPPORTED_FEATURE_OR_
+                     * PARAMETER_VALUE (0x11) and that's the status that
+                     * propagates here.  It's not a failure — boot
+                     * keyboard reports are a fixed 8-byte format and need
+                     * no descriptor for parsing.  Since the Classic path
+                     * is universally BOOT mode (set in setup.c), treat
+                     * 0x11 as the expected outcome on this transport. */
+                    if (status == ERROR_CODE_UNSUPPORTED_FEATURE_OR_PARAMETER_VALUE) {
+                        printf("[bt] HID descriptor unavailable (BTstack skips SDP in BOOT mode — expected, no parse needed)\n");
+                        g_descriptor_valid = true;
+                        set_stage(BT_STAGE_DESCRIPTOR);
+                        break;
+                    }
                     if (status != ERROR_CODE_SUCCESS) {
                         printf("[bt] HID_SUBEVENT_DESCRIPTOR_AVAILABLE FAIL status=0x%02x\n", status);
-                        /* Surface the descriptor fetch error via the FAILED
-                         * stage + status code rather than silently dropping. */
                         g_status_code = status;
                         set_stage(BT_STAGE_FAILED);
                         break;

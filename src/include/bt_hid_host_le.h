@@ -1,0 +1,35 @@
+#pragma once
+
+#ifdef DH_BT_HID_HOST_KBD
+
+#include "bt_hid_host.h"   /* bt_hid_state_t — shared with the Classic path */
+
+/* BLE (Bluetooth Low Energy) HID-over-GATT Profile (HOGP) host on board A.
+ *
+ * This is the BLE peer of bt_hid_host.c (Classic BR/EDR HID host).  Both
+ * run simultaneously on the shared CYW43 radio so the deskhop pairs with
+ * keyboards on either transport — Classic-only (rare), BLE-only (most
+ * modern wireless keyboards like the 8BitDo Retro Mechanical), or dual-
+ * mode (e.g. Keychron K7).  First connection wins; the other transport
+ * keeps scanning but does nothing while a peer is connected.
+ *
+ * Reports are forwarded through the SAME bt_hid_state_t.process_report
+ * callback used by the Classic path.  BLE HOGP boot keyboard reports
+ * have the identical 8-byte layout to Classic boot reports (modifier +
+ * reserved + 6 keycodes), so deskhop's _extract_kbd_boot path consumes
+ * both without any per-transport conditionals.
+ *
+ * Must be called AFTER cyw43_arch_init() and BEFORE bt_hid_host_init().
+ * bt_hid_host_init() is the one that calls hci_power_control(HCI_POWER_ON)
+ * to bring the radio up — both transports come online together at that
+ * moment.  Calling order:
+ *
+ *     bt_hid_host_le_init(&bt_state);   // register BLE handlers
+ *     bt_hid_host_init(&bt_state);      // register Classic handlers + power on
+ *
+ * Reference: pico-sdk/lib/btstack/example/hog_boot_host_demo.c.
+ *
+ * See issue #29 for design rationale and the 8BitDo Retro use case. */
+void bt_hid_host_le_init(bt_hid_state_t *bt_state);
+
+#endif /* DH_BT_HID_HOST_KBD */
