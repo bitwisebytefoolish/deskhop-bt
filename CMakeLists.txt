@@ -217,6 +217,7 @@ if(DH_OLED_UI)
     target_sources(${binary} PRIVATE
         ${SRC_DIR}/oled.c
         ${SRC_DIR}/ui.c
+        ${SRC_DIR}/buttons.c
     )
 endif()
 ## bt_events.c compiles unconditionally — bt_hid_host*.c reference it

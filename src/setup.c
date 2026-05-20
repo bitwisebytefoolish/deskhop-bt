@@ -16,6 +16,7 @@
 #include "main.h"
 #include "boot_crumb.h"
 #include "ui.h"              /* ui_init — no-op stub on non-OLED builds */
+#include "buttons.h"         /* buttons_init — no-op stub on non-OLED builds */
 
 #include <stdio.h>           /* printf — routed to stdio_uart on UART1 / GP4, see #26 */
 #include "pico/stdlib.h"     /* stdio_init_all() — re-call after set_sys_clock_khz */
@@ -414,6 +415,12 @@ void initial_setup(device_t *state) {
      * any noise the panel might be holding from a previous session,
      * and so the UI is ready to receive events as soon as BT comes up. */
     ui_init();
+    /* Button GPIOs (issue #22 Phase 2).  Init unconditionally — if no
+     * buttons are wired, the pull-ups keep the lines high and the
+     * GPIO IRQ never fires.  Safe even when the OLED itself is
+     * absent: button events accumulate in their ring but the UI
+     * task is a no-op so they're harmlessly discarded. */
+    buttons_init();
 #endif
 #endif
 
