@@ -44,6 +44,7 @@
 #include "ble/sm.h"
 #include "ble/gatt_client.h"
 #include "ble/att_db.h"
+#include "ble/le_device_db.h"
 #include "ble/gatt-service/hids_client.h"
 #include "ad_parser.h"
 #include "btstack_tlv.h"
@@ -544,8 +545,12 @@ static void le_sm_packet_handler(uint8_t packet_type, uint16_t channel,
             /* BTstack just stored an identity entry (IRK + identity
              * address) for this peer in le_device_db.  This is what
              * lets future bonded-reconnects resolve the peer's
-             * Resolvable Private Address back to the same device. */
-            printf("[ble] identity created (peer is now bonded)\n");
+             * Resolvable Private Address back to the same device.
+             * If a peripheral pairs successfully but this event NEVER
+             * fires, the peer didn't share its IRK — and re-pair will
+             * be required on every session.  Some BLE mice do this. */
+            printf("[ble] identity created (peer is now bonded, DB now has %d entries)\n",
+                   le_device_db_count());
             break;
 
         case SM_EVENT_REENCRYPTION_COMPLETE:
@@ -610,7 +615,16 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
                 break;
             if (le_state != LE_W4_WORKING)
                 break;
-            printf("[ble] HCI_STATE_WORKING\n");
+            /* Boot-time diagnostic: how many bonded LE devices are
+             * persisted in our flash-backed device DB?  Each entry
+             * carries an IRK that resolves the peer's RPA back to a
+             * stable identity on reconnect.  Devices that DON'T share
+             * an IRK during pairing (vendor privacy choice — some BLE
+             * mice do this) won't have a usable entry here; they'll
+             * always re-pair fresh.  Devices that DO share IRK should
+             * appear here at count > 0 after the first successful pair. */
+            printf("[ble] HCI_STATE_WORKING (LE device DB has %d/%d bonded entries)\n",
+                   le_device_db_count(), le_device_db_max_count());
             le_start_connect();
             break;
 
