@@ -216,16 +216,33 @@ static void le_connect_to_remote(void) {
 }
 
 static void le_start_connect(void) {
+    /* Initialize the TLV handle so SM_EVENT_PAIRING_COMPLETE can still
+     * persist the most-recently-bonded device's address (used for the
+     * "favourite-device" hint, even though we no longer drive a
+     * fast-reconnect from it).  Keep the store path; drop the load path. */
     btstack_tlv_get_instance(&le_tlv_impl, &le_tlv_ctx);
-    if (le_tlv_impl) {
-        int n = le_tlv_impl->get_tag(le_tlv_ctx, TLV_TAG_HOGD,
-                                     (uint8_t *)&le_remote, sizeof(le_remote));
-        if (n == sizeof(le_remote)) {
-            printf("[ble] bonded device found in TLV, reconnecting\n");
-            le_connect_to_remote();
-            return;
-        }
-    }
+
+    /* The original design here cold-connected directly to the last-bonded
+     * device via gap_connect(stored_address) without first seeing it
+     * advertise.  Observed on every cold boot with the multi-device
+     * setup:
+     *
+     *   gap_connect <last paired> → identity resolves → re-encryption
+     *   succeeds → hids_client_connect FAILS with status=0x1f
+     *
+     * That 0x1f is gatt_client_att_status_to_error_code() swallowing a
+     * real ATT error during HID service discovery.  Hypothesis: by
+     * connecting before the peripheral has advertised, we hit it before
+     * its GATT server has finished restoring state from low-power, and
+     * the discovery query gets a NOT_FOUND / TIMEOUT response.  Once
+     * we let the scan path drive (peer advertises → we connect on its
+     * own schedule), the same hids_client_connect succeeds first try.
+     *
+     * Now that ENABLE_LE_PRIVACY_ADDRESS_RESOLUTION is on and we accept
+     * ADV_DIRECT_IND, bonded peers reliably re-find us via their own
+     * advertising — so the TLV fast-reconnect provides no value and
+     * costs one wasted ~5 s connect-then-fail cycle at every boot.
+     * Drop it; always scan. */
     le_start_scan();
 }
 
@@ -628,13 +645,59 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
              * cascading into mass re-pair.  See #34 for the diagnosis. */
             printf("[ble] HCI_STATE_WORKING (LE device DB has %d/%d bonded entries)\n",
                    le_device_db_count(), le_device_db_max_count());
+            /* Populate the controller's LL resolving list from the bond DB.
+             * Without this, the controller treats every incoming
+             * Resolvable Private Address as a fresh unknown — which means
+             * we can't see DIRECTED advertisements that a bonded
+             * peripheral sends to our identity (peer puts our resolved
+             * RPA in InitA; if the controller can't match it, the host
+             * never gets the adv report).
+             *
+             * Symptom this fixes: cold boot with only the mouse powered
+             * shows zero `HID adv from ...` events, because Logitech
+             * (and most modern BLE) mice switch to DIRECTED adv toward
+             * the bonded central after the first idle window.  Loading
+             * the resolving list opens that channel.
+             *
+             * Safe to call repeatedly; BTstack iterates the bond DB and
+             * pushes each (IRK, identity addr) pair to the controller. */
+            gap_load_resolving_list_from_le_device_db();
             le_start_connect();
             break;
 
         case GAP_EVENT_ADVERTISING_REPORT: {
             if (le_state != LE_W4_HID_DEVICE_FOUND)
                 break;
-            if (!le_adv_contains_hid_service(packet))
+            /* Two acceptance paths for adv packets:
+             *
+             *  (1) UNDIRECTED adv (ADV_IND, ADV_SCAN_IND, ADV_NONCONN_IND)
+             *      → must contain the HID service UUID (0x1812) in the AD
+             *      payload, otherwise we connect to random non-HID devices.
+             *
+             *  (2) DIRECTED adv (ADV_DIRECT_IND) → accept unconditionally.
+             *      A directed adv only goes out from a peer that already
+             *      knows us (the bond exchanged identity info both ways);
+             *      its 12-byte LL payload is `AdvA + InitA` with NO AD
+             *      data, so the UUID filter would reject every one.  This
+             *      is the path bonded HID mice take when they wake from
+             *      sleep — high-duty-cycle directed adv for ~1.28 s
+             *      targeting the bonded central, then back to sleep.
+             *      Pre-fix symptom: mouse never reconnects after cold
+             *      boot because every one of its 300+ HDC adv packets in
+             *      that 1.28 s window hits the UUID filter and is
+             *      silently dropped.
+             *
+             *  Also accept resolved-identity address types (PUBLIC_IDENTITY
+             *  / RANDOM_IDENTITY) — those indicate the controller resolved
+             *  an incoming RPA to a bonded peer via the LL resolving list,
+             *  so it's definitely one of our HID peripherals even if the
+             *  payload lacks UUIDs (e.g. directed adv to RPA). */
+            uint8_t adv_event_type = gap_event_advertising_report_get_advertising_event_type(packet);
+            uint8_t adv_addr_type  = gap_event_advertising_report_get_address_type(packet);
+            bool is_directed  = (adv_event_type == 0x01);  /* ADV_DIRECT_IND */
+            bool is_identity  = (adv_addr_type == BD_ADDR_TYPE_LE_PUBLIC_IDENTITY) ||
+                                (adv_addr_type == BD_ADDR_TYPE_LE_RANDOM_IDENTITY);
+            if (!is_directed && !is_identity && !le_adv_contains_hid_service(packet))
                 break;
             bd_addr_t adv_addr;
             gap_event_advertising_report_get_address(packet, adv_addr);
@@ -655,10 +718,15 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
             gap_stop_scan();
             bd_addr_copy(le_remote.addr, adv_addr);
             le_remote.addr_type = gap_event_advertising_report_get_address_type(packet);
-            printf("[ble] HID adv from %02x:%02x:%02x:%02x:%02x:%02x (addr_type=%u)\n",
+            printf("[ble] HID adv from %02x:%02x:%02x:%02x:%02x:%02x (addr_type=%u, adv_type=%s)\n",
                    le_remote.addr[0], le_remote.addr[1], le_remote.addr[2],
                    le_remote.addr[3], le_remote.addr[4], le_remote.addr[5],
-                   le_remote.addr_type);
+                   le_remote.addr_type,
+                   adv_event_type == 0x00 ? "ADV_IND" :
+                   adv_event_type == 0x01 ? "ADV_DIRECT_IND" :
+                   adv_event_type == 0x02 ? "ADV_SCAN_IND" :
+                   adv_event_type == 0x03 ? "ADV_NONCONN_IND" :
+                   adv_event_type == 0x04 ? "SCAN_RSP" : "UNKNOWN");
             le_connect_to_remote();
             break;
         }
