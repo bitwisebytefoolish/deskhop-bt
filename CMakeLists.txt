@@ -2,8 +2,20 @@ cmake_minimum_required(VERSION 3.13)
 
 ## Version Configuration.
 ## Define e.g. 0.72 as major 0 and minor 72
-set(VERSION_MAJOR 0)
-set(VERSION_MINOR 77)
+##
+## deskhop-bt 1.0.0 (release tag v1.0.0-bt): first numbered release of the
+## Bluetooth fork.  Inherits the upstream 0.77 codebase and adds Phase 0
+## board bring-up, BT Classic + BLE HOGP HID host on board A (Pico 2 W),
+## multi-device bonding, persistent bonds, cold-boot reconnect (PR #38),
+## and full fork documentation (PR #39).  See BLUETOOTH.md for the user
+## guide.
+##
+## FIRMWARE_VERSION (used in OTA compatibility checks) computes as
+## MAJOR*1000 + MINOR + 100 = 1100 here — strictly greater than the
+## inherited 0.77's 177, so the upstream A/B OTA logic still works for
+## same-fork upgrades.
+set(VERSION_MAJOR 1)
+set(VERSION_MINOR 0)
 
 ## Release Type Selection
 option(DH_DEBUG "Build a debug version" OFF)
