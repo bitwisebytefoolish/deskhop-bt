@@ -720,12 +720,28 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
 void bt_hid_host_le_init(bt_hid_state_t *bt_state) {
     g_bt = bt_state;
 
-    /* Security Manager — just-works pairing, permissive AuthReq (peripheral
-     * dictates).  See earlier commits in #29 for the rationale: requesting
-     * SC up-front caused the 8BitDo to time out the pairing exchange. */
+    /* Security Manager — just-works pairing with LE Secure Connections
+     * required AND bonding.  Initial #29 implementation requested SC and
+     * the 8BitDo timed out — but the actual cause of that timeout was a
+     * separate bug (bare sm_request_pairing() that the 8BitDo ignored),
+     * fixed later in #29 via gatt_client_set_required_security_level(
+     * LEVEL_2) which triggers pairing organically through a GATT op.
+     *
+     * Re-enabling SC now per #36: modern BLE peripherals (post-2017)
+     * tend to treat **legacy pairing as throwaway** and only persist
+     * a bond when SC is negotiated.  Symptom: our previously-paired
+     * mouse re-pairs every session ("identity resolving FAILED")
+     * despite SM_EVENT_IDENTITY_CREATED firing successfully.  Same
+     * mouse on macOS retains its bond, suggesting Apple's SC-required
+     * pairing is what triggers persistent bonding peripheral-side.
+     *
+     * If this regresses the 8BitDo or any other previously-working
+     * device, we have a fallback in mind: detect SC-pairing failure
+     * and retry with legacy AuthReq.  For now, take the simpler path
+     * and require SC for all LE pairs. */
     sm_init();
     sm_set_io_capabilities(IO_CAPABILITY_NO_INPUT_NO_OUTPUT);
-    sm_set_authentication_requirements(SM_AUTHREQ_BONDING);
+    sm_set_authentication_requirements(SM_AUTHREQ_SECURE_CONNECTION | SM_AUTHREQ_BONDING);
 
     /* GATT client base + security policy: BTstack auto-triggers pairing
      * when an op needs higher security than the current connection has. */
