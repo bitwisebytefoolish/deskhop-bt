@@ -76,9 +76,18 @@
  * MAX_NR_HID_HOST_CONNECTIONS bug). */
 #define MAX_NR_HIDS_CLIENTS           4
 
-/* BLE bond DB: keep parity with Classic NVM_NUM_LINK_KEYS.  8 slots
- * gives room for both transports' bonds without collisions. */
-#define MAX_NR_LE_DEVICE_DB_ENTRIES   8
+/* BLE bond DB: must be sized for the WORST case where peripherals
+ * rotate their IRK every session — each pair creates a new entry,
+ * and the old ones never resolve again.  Some BLE mice do this as a
+ * privacy feature (defeats host-side tracking but means bonds are
+ * effectively single-session).  Without enough headroom, the
+ * accumulating stale entries fill the DB and BTstack starts evicting
+ * "good" entries belonging to other devices (cascade: keyboard +
+ * numpad also lose their bonds and need fresh pair).  See #34
+ * diagnostic.  32 gives ~30 mouse re-pair cycles before we have to
+ * wipe; in practice the user wipes BTstack flash on hardware reflash
+ * anyway. */
+#define MAX_NR_LE_DEVICE_DB_ENTRIES   32
 
 /* In-flight Security Manager transactions.  Default 3 is conservative;
  * bumped to 4 to match concurrent connect attempts. */
@@ -106,8 +115,14 @@
 
 /* ---- Bond storage (TLV via pico_btstack_flash_bank) --------------- */
 
-#define NVM_NUM_LINK_KEYS             8
-#define NVM_NUM_DEVICE_DB_ENTRIES     8
+/* Flash-backed NVM counts: match MAX_NR_LE_DEVICE_DB_ENTRIES so the
+ * RAM-side and flash-side capacity agree.  Classic side gets the same
+ * 32 even though it doesn't have the IRK-rotation problem — keeping
+ * the constants parallel makes the relationship obvious.  Flash cost:
+ * each link-key entry is ~30 B + each device-db entry ~50 B → ~2.5 KB
+ * total of FLASH_BTSTACK_BANK's 8 KB.  Comfortable. */
+#define NVM_NUM_LINK_KEYS             32
+#define NVM_NUM_DEVICE_DB_ENTRIES     32
 
 /* Place the BTstack TLV bank 12 KB from the end of flash, directly below
  * FLASH_CONFIG (4 KB).  pico_btstack_flash_bank's default would use the
