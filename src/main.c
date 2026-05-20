@@ -10,6 +10,7 @@
  */
 #include "main.h"
 #include "boot_crumb.h"
+#include "ui.h"              /* ui_render_task — no-op stub on non-OLED builds */
 
 #include <stdio.h>           /* printf via pico_stdio_uart — see #26 */
 #include "pico/stdlib.h"     /* stdio_init_all() */
@@ -72,6 +73,9 @@ int main(void) {
 #endif
 #ifdef CYW43_WL_GPIO_LED_PIN
         [8] = {.exec = &cyw43_poll_task,          .frequency = _TOP()},      // | Pump cyw43 / BTstack event loop (poll variant) — Pico W / 2 W only
+#endif
+#ifdef DH_OLED_UI
+        [9] = {.exec = &ui_render_task,           .frequency = _HZ(30)},     // | OLED UI render — drains bt_events queue, redraws on dirty signature (#22)
 #endif
         /* Note: runtime BOOTSEL-button polling intentionally NOT added here.
            is_bootsel_pressed() floats QSPI CS for 20 µs with IRQs disabled;

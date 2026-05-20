@@ -52,7 +52,92 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "pico/time.h"     /* time_us_64 — used in bt_events publish sites */
 #include "bt_hid_host_le.h"
+#include "bt_events.h"
+
+/* ---- Device-name harvest cache --------------------------------------
+ * Some BLE peripherals include their friendly name in the Complete /
+ * Shortened Local Name AD records of their UNDIRECTED advertisements.
+ * Directed adv (ADV_DIRECT_IND) carries no payload, so the name is
+ * unavailable during cold-boot reconnect.  Cache names by address from
+ * any undirected adv we see; when the peer connects, publish the name
+ * along with the BT_EVT_DEVICE_CONNECTED.  Phase-2/3 work will add a
+ * GATT Device Name (UUID 0x2A00) fallback for devices that never
+ * advertise undirected (purely directed-mode peers).
+ *
+ * Size: 8 slots × ~32 B = ~256 B.  Cache is per-session — names
+ * persist across reconnects within the same boot but not across
+ * reboots.  That's fine: once a peer adv-es undirected once (which it
+ * will if put back into pairing mode), the cache repopulates.
+ *
+ * Build-gated on DH_OLED_UI to keep the cache out of builds that don't
+ * need it — it's only consumed by the UI. */
+#ifdef DH_OLED_UI
+#define LE_NAME_CACHE_CAP 8
+static struct {
+    bd_addr_t addr;
+    char      name[BT_EVT_NAME_MAX];
+    bool      in_use;
+} le_name_cache[LE_NAME_CACHE_CAP];
+
+static void le_name_cache_put(const bd_addr_t addr, const char *name) {
+    /* Replace existing entry first if the addr matches. */
+    for (int i = 0; i < LE_NAME_CACHE_CAP; i++) {
+        if (le_name_cache[i].in_use && memcmp(le_name_cache[i].addr, addr, 6) == 0) {
+            strncpy(le_name_cache[i].name, name, BT_EVT_NAME_MAX - 1);
+            le_name_cache[i].name[BT_EVT_NAME_MAX - 1] = '\0';
+            return;
+        }
+    }
+    /* Otherwise insert into the first free slot, or evict slot 0 if
+     * full (the queue isn't LRU because peers tend to be stable —
+     * a flat-evict policy is good enough at this size). */
+    int slot = -1;
+    for (int i = 0; i < LE_NAME_CACHE_CAP; i++) {
+        if (!le_name_cache[i].in_use) { slot = i; break; }
+    }
+    if (slot < 0) slot = 0;
+    memcpy(le_name_cache[slot].addr, addr, 6);
+    strncpy(le_name_cache[slot].name, name, BT_EVT_NAME_MAX - 1);
+    le_name_cache[slot].name[BT_EVT_NAME_MAX - 1] = '\0';
+    le_name_cache[slot].in_use = true;
+}
+
+static const char *le_name_cache_get(const bd_addr_t addr) {
+    for (int i = 0; i < LE_NAME_CACHE_CAP; i++) {
+        if (le_name_cache[i].in_use && memcmp(le_name_cache[i].addr, addr, 6) == 0) {
+            return le_name_cache[i].name;
+        }
+    }
+    return "";
+}
+
+/* Scan an LE adv payload for AD type 0x09 (Complete Local Name) or
+ * 0x08 (Shortened Local Name).  If found, copy up to BT_EVT_NAME_MAX-1
+ * bytes into out and return true.  The peripheral advertising name is
+ * typically printable ASCII; we copy verbatim and let the OLED font's
+ * 0x20..0x7E range handle display. */
+static bool le_extract_local_name(const uint8_t *ad_data, uint8_t ad_len, char *out) {
+    int i = 0;
+    while (i + 1 < ad_len) {
+        uint8_t len = ad_data[i];
+        if (len == 0) break;
+        if (i + 1 + len > ad_len) break;
+        uint8_t type = ad_data[i + 1];
+        if (type == 0x09 /* COMPLETE_LOCAL_NAME */ ||
+            type == 0x08 /* SHORTENED_LOCAL_NAME */) {
+            uint8_t name_len = len - 1;
+            if (name_len >= BT_EVT_NAME_MAX) name_len = BT_EVT_NAME_MAX - 1;
+            memcpy(out, &ad_data[i + 2], name_len);
+            out[name_len] = '\0';
+            return true;
+        }
+        i += 1 + len;
+    }
+    return false;
+}
+#endif /* DH_OLED_UI */
 
 /* ---- Shared state -------------------------------------------------- */
 
@@ -465,6 +550,24 @@ static void le_hids_client_event_handler(uint8_t packet_type, uint16_t channel,
              * don't try to reconnect to it (which would tear down this
              * very connection). */
             le_add_active(le_remote.addr, connected_cid);
+#ifdef DH_OLED_UI
+            /* Tell the UI the connection is up.  Attach the cached
+             * friendly name (from undirected adv earlier this session)
+             * if we have one — otherwise the UI renders the address
+             * tail until the name is resolved by a future GATT read
+             * (Phase 2/3). */
+            {
+                bt_event_t e = {
+                    .type      = BT_EVT_DEVICE_CONNECTED,
+                    .transport = BT_TRANSPORT_LE,
+                    .cid       = connected_cid,
+                    .ts_us     = time_us_64(),
+                };
+                bt_evt_addr_from_bd(&e.addr, le_remote.addr);
+                strncpy(e.name, le_name_cache_get(le_remote.addr), BT_EVT_NAME_MAX - 1);
+                bt_events_publish(&e);
+            }
+#endif
             /* Persist this device address for fast direct-reconnect on
              * next boot.  Stores the MOST RECENTLY connected device.
              * Multi-device extension TODO: maintain an array of bonded
@@ -491,6 +594,23 @@ static void le_hids_client_event_handler(uint8_t packet_type, uint16_t channel,
         case GATTSERVICE_SUBEVENT_HID_SERVICE_DISCONNECTED: {
             uint16_t disc_cid = gattservice_subevent_hid_service_disconnected_get_hids_cid(packet);
             printf("[ble] HID service client disconnected (cid=0x%04x)\n", disc_cid);
+#ifdef DH_OLED_UI
+            /* Publish DISCONNECTED with the address recovered from the
+             * active table — must be done BEFORE le_remove_active_by_cid
+             * frees the slot, otherwise we lose the addr → cid binding. */
+            for (int i = 0; i < le_num_active; i++) {
+                if (le_active[i].hids_cid != disc_cid) continue;
+                bt_event_t e = {
+                    .type      = BT_EVT_DEVICE_DISCONNECTED,
+                    .transport = BT_TRANSPORT_LE,
+                    .cid       = disc_cid,
+                    .ts_us     = time_us_64(),
+                };
+                bt_evt_addr_from_bd(&e.addr, le_active[i].addr);
+                bt_events_publish(&e);
+                break;
+            }
+#endif
             le_remove_active_by_cid(disc_cid);
             /* If we'd capped scanning because slots were full, restart
              * it now that one freed up. */
@@ -570,6 +690,25 @@ static void le_sm_packet_handler(uint8_t packet_type, uint16_t channel,
              * behaviour.  See #34. */
             printf("[ble] identity created (peer is now bonded, DB now has %d/%d entries)\n",
                    le_device_db_count(), le_device_db_max_count());
+#ifdef DH_OLED_UI
+            /* New bond persisted to flash.  Refresh the UI's bonded
+             * counter from the authoritative source (le_device_db_count)
+             * — bt_events.c also increments locally on the
+             * DEVICE_PAIRED event for snappiness, but le_device_db_count
+             * is the truth in case the increment race-loses against
+             * a near-simultaneous load. */
+            bt_events_set_bonded_count((uint8_t)le_device_db_count());
+            {
+                bt_event_t e = {
+                    .type      = BT_EVT_DEVICE_PAIRED,
+                    .transport = BT_TRANSPORT_LE,
+                    .ts_us     = time_us_64(),
+                };
+                bt_evt_addr_from_bd(&e.addr, le_remote.addr);
+                strncpy(e.name, le_name_cache_get(le_remote.addr), BT_EVT_NAME_MAX - 1);
+                bt_events_publish(&e);
+            }
+#endif
             break;
 
         case SM_EVENT_REENCRYPTION_COMPLETE:
@@ -645,6 +784,21 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
              * cascading into mass re-pair.  See #34 for the diagnosis. */
             printf("[ble] HCI_STATE_WORKING (LE device DB has %d/%d bonded entries)\n",
                    le_device_db_count(), le_device_db_max_count());
+#ifdef DH_OLED_UI
+            /* UI bring-up: tell the event bus how many bonds we
+             * inherited from flash, and emit a RADIO_UP marker so the
+             * status screen can transition from "...waiting..." to
+             * "scanning".  Done here rather than inside an event
+             * because the bonded count is queryable directly via
+             * le_device_db_count() and we don't want to fabricate
+             * fake-pair events for already-persisted bonds. */
+            bt_events_set_bonded_count((uint8_t)le_device_db_count());
+            {
+                bt_event_t e = {.type = BT_EVT_RADIO_UP, .transport = BT_TRANSPORT_LE,
+                                .ts_us = time_us_64()};
+                bt_events_publish(&e);
+            }
+#endif
             /* Populate the controller's LL resolving list from the bond DB.
              * Without this, the controller treats every incoming
              * Resolvable Private Address as a fresh unknown — which means
@@ -718,6 +872,21 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
             gap_stop_scan();
             bd_addr_copy(le_remote.addr, adv_addr);
             le_remote.addr_type = gap_event_advertising_report_get_address_type(packet);
+#ifdef DH_OLED_UI
+            /* Harvest the peer's friendly name from any AD records in
+             * this packet.  Directed adv has no payload (is_directed
+             * implies the UUID-bypass path above), so this only
+             * succeeds on undirected adv.  Cached by address so the
+             * eventual BT_EVT_DEVICE_CONNECTED can attach the name. */
+            if (!is_directed) {
+                const uint8_t *ad_data = gap_event_advertising_report_get_data(packet);
+                uint8_t        ad_len  = gap_event_advertising_report_get_data_length(packet);
+                char           name[BT_EVT_NAME_MAX];
+                if (le_extract_local_name(ad_data, ad_len, name) && name[0]) {
+                    le_name_cache_put(adv_addr, name);
+                }
+            }
+#endif
             printf("[ble] HID adv from %02x:%02x:%02x:%02x:%02x:%02x (addr_type=%u, adv_type=%s)\n",
                    le_remote.addr[0], le_remote.addr[1], le_remote.addr[2],
                    le_remote.addr[3], le_remote.addr[4], le_remote.addr[5],

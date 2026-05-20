@@ -127,6 +127,7 @@ set(COMMON_LINK_LIBRARIES
   hardware_gpio
   hardware_pio
   hardware_dma
+  hardware_i2c
 
   tinyusb_device
   tinyusb_host
@@ -199,6 +200,30 @@ if(DH_BT_HID_HOST_KBD)
         ${SRC_DIR}/bt_hid_host_le.c
     )
 endif()
+
+## OLED + button UI (issue #22).  Phase 1: status screen on board A,
+## SSD1306 over I2C0 (GP0/GP1).  Buttons reserved in pinout.h for
+## Phase 2.  Default ON for pico2_w (only board with BT host); OFF
+## for pico (RP2040 — no BT, no UI).  Safe with the panel absent —
+## oled_init returns false, ui_render_task no-ops.
+if(NOT DEFINED DH_OLED_UI)
+    if(PICO_BOARD STREQUAL "pico2_w")
+        set(DH_OLED_UI 1)
+    else()
+        set(DH_OLED_UI 0)
+    endif()
+endif()
+if(DH_OLED_UI)
+    target_sources(${binary} PRIVATE
+        ${SRC_DIR}/oled.c
+        ${SRC_DIR}/ui.c
+    )
+endif()
+## bt_events.c compiles unconditionally — bt_hid_host*.c reference it
+## inside #ifdef DH_OLED_UI guards, but keeping the symbol always-defined
+## (publish becomes a no-op when no consumer exists) avoids link-time
+## conditionals on every call site.
+target_sources(${binary} PRIVATE ${SRC_DIR}/bt_events.c)
 target_compile_definitions(${binary}
     PRIVATE
     VERSION_MAJOR=${VERSION_MAJOR}
@@ -211,6 +236,8 @@ target_compile_definitions(${binary}
     $<$<BOOL:${PICO_CYW43_SUPPORTED}>:CYW43_LWIP=0>
     # BT HID host keyboard flag — propagated to source so #ifdef guards work.
     $<$<BOOL:${DH_BT_HID_HOST_KBD}>:DH_BT_HID_HOST_KBD>
+    # OLED UI flag — propagated to source so #ifdef guards work.
+    $<$<BOOL:${DH_OLED_UI}>:DH_OLED_UI>
     __disk_file_path__="${DISK_BIN}"
     # Double core0 stack (SCRATCH_Y) from 2KB to 4KB.  cyw43_arch_init +
     # BTstack init have a deeper frame chain than the default 2KB accommodates.

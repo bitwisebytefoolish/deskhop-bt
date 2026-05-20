@@ -15,6 +15,7 @@
 
 #include "main.h"
 #include "boot_crumb.h"
+#include "ui.h"              /* ui_init — no-op stub on non-OLED builds */
 
 #include <stdio.h>           /* printf — routed to stdio_uart on UART1 / GP4, see #26 */
 #include "pico/stdlib.h"     /* stdio_init_all() — re-call after set_sys_clock_khz */
@@ -405,6 +406,14 @@ void initial_setup(device_t *state) {
     bt_hid_host_le_init(&bt_hid_state);
     watchdog_update();
     boot_crumb_set_phase(PHASE_AFTER_BT_HID_INIT);
+
+    /* OLED + UI bring-up (issue #22).  Probes the I2C bus for the
+     * SSD1306; if nothing ACKs, ui_init returns false and the
+     * ui_render_task no-ops at runtime — safe to call unconditionally.
+     * Done AFTER bt_hid_host_init so the boot splash can paint over
+     * any noise the panel might be holding from a previous session,
+     * and so the UI is ready to receive events as soon as BT comes up. */
+    ui_init();
 #endif
 #endif
 
