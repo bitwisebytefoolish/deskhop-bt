@@ -44,6 +44,7 @@
 #include "ble/sm.h"
 #include "ble/gatt_client.h"
 #include "ble/att_db.h"
+#include "ble/le_device_db.h"
 #include "ble/gatt-service/hids_client.h"
 #include "ad_parser.h"
 #include "btstack_tlv.h"
@@ -544,8 +545,14 @@ static void le_sm_packet_handler(uint8_t packet_type, uint16_t channel,
             /* BTstack just stored an identity entry (IRK + identity
              * address) for this peer in le_device_db.  This is what
              * lets future bonded-reconnects resolve the peer's
-             * Resolvable Private Address back to the same device. */
-            printf("[ble] identity created (peer is now bonded)\n");
+             * Resolvable Private Address back to the same device —
+             * UNLESS the peer rotates its IRK every session, in which
+             * case each pair creates a fresh entry that's useless next
+             * time.  The DB count growing without saturating useful
+             * reconnects is the smoke signal for that vendor-side
+             * behaviour.  See #34. */
+            printf("[ble] identity created (peer is now bonded, DB now has %d/%d entries)\n",
+                   le_device_db_count(), le_device_db_max_count());
             break;
 
         case SM_EVENT_REENCRYPTION_COMPLETE:
@@ -610,7 +617,17 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
                 break;
             if (le_state != LE_W4_WORKING)
                 break;
-            printf("[ble] HCI_STATE_WORKING\n");
+            /* Boot-time bond DB status.  Each entry is one peer's IRK
+             * + identity address — used to resolve their rotating RPAs
+             * back to a stable identity on reconnect.  Devices that
+             * regenerate their IRK each session (some BLE mice do this
+             * as a privacy feature — vendor-controlled) accumulate
+             * stale entries here.  Watch this count grow over multiple
+             * mouse-pair sessions; if it approaches MAX, BTstack will
+             * start evicting "good" entries belonging to other devices,
+             * cascading into mass re-pair.  See #34 for the diagnosis. */
+            printf("[ble] HCI_STATE_WORKING (LE device DB has %d/%d bonded entries)\n",
+                   le_device_db_count(), le_device_db_max_count());
             le_start_connect();
             break;
 
