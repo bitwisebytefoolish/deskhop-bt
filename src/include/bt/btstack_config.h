@@ -35,6 +35,23 @@
 #define ENABLE_LE_PERIPHERAL
 #define ENABLE_LE_SECURE_CONNECTIONS
 
+/* Have the CYW43 controller resolve Resolvable Private Addresses
+ * locally (LL resolving list) instead of leaving it entirely to the
+ * host.  Without this flag:
+ *   - bonded peripherals that switch to DIRECTED advertising at the
+ *     bonded central's resolved address generate adv packets the host
+ *     never sees (the controller filters InitA-mismatch packets);
+ *   - gap_load_resolving_list_from_le_device_db() is compiled OUT of
+ *     hci.c entirely (#ifdef-gated) — so any host-side attempt to
+ *     prime the resolving list at HCI_STATE_WORKING is a no-op even
+ *     if the symbol existed.
+ * Symptom seen without this: cold boot with only a bonded BLE mouse
+ * powered shows zero `HID adv from ...` events — the mouse is doing
+ * directed-to-RPA adv and the controller silently drops every packet.
+ * Enabling adds the LE Set Address Resolution Enable / Add Device To
+ * Resolving List / etc. HCI command paths and ~1-2 KB of code. */
+#define ENABLE_LE_PRIVACY_ADDRESS_RESOLUTION
+
 /* hci_dump_embedded_stdout.c (compiled unconditionally by pico_btstack_base)
  * requires this flag to exist, even if we never call hci_dump_init(). */
 #define ENABLE_PRINTF_HEXDUMP
