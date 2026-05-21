@@ -18,11 +18,20 @@ cmake_minimum_required(VERSION 3.13)
 ## HOGP HID host on board A (Pico 2 W), multi-device bonding, persistent
 ## bonds, cold-boot reconnect (PR #38), fork docs (PR #39).
 ##
+## 1.1.0 (v1.1.0-bt, OLED): adds the SSD1306 OLED + button UI (#22 Phase
+## 1/2) — always-on status screen, menu navigation, device-type icons.
+##
+## 1.2.0 (v1.2.0-bt): #22 Phase 3 — pair-new flow with countdown, forget
+## device / forget all wired to real bond removal, persistent device-name
+## metadata (TLV), opt-in pairing for OLED builds. Plus review fixes:
+## forget clears the active list immediately, single-cell marquee ellipsis,
+## full-length GAP device names (read-by-handle, not Read-By-Type).
+##
 ## FIRMWARE_VERSION (used in OTA compatibility checks) computes as
-## MAJOR*1000 + MINOR + 100 = 1101 here — strictly greater than 1.0.0's
-## 1100, so the upstream A/B OTA version comparison still orders correctly.
+## MAJOR*1000 + MINOR + 100 = 1102 here — strictly greater than 1.1.0's
+## 1101, so the upstream A/B OTA version comparison still orders correctly.
 set(VERSION_MAJOR 1)
-set(VERSION_MINOR 1)
+set(VERSION_MINOR 2)
 
 ## Release Type Selection
 option(DH_DEBUG "Build a debug version" OFF)
