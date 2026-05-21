@@ -51,6 +51,14 @@ void bt_hid_host_le_forget_all(void);
  * on success / cancel / timeout.  Bonded devices reconnect regardless. */
 void bt_hid_host_le_set_pairing_open(bool open);
 
+/* Enable / disable always-on auto-pairing.  Default is ON, so a headless
+ * / lite build (no LCD UI) auto-pairs any advertising HID device — the
+ * 1.0.0 behaviour.  The UI calls this with `false` at boot ONLY when it
+ * confirms an OLED panel is present, switching to opt-in pairing (the
+ * Pair-new flow then opens a temporary window).  With no panel, auto-pair
+ * stays on so the device is still usable without a screen. */
+void bt_hid_host_le_set_auto_pair(bool enable);
+
 /* A bonded-device record for the LCD device list.  Lets the UI show every
  * bond (connected or not) with a connection-status indicator. */
 typedef struct {

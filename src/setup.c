@@ -414,13 +414,21 @@ void initial_setup(device_t *state) {
      * Done AFTER bt_hid_host_init so the boot splash can paint over
      * any noise the panel might be holding from a previous session,
      * and so the UI is ready to receive events as soon as BT comes up. */
-    ui_init();
+    bool oled_present = ui_init();
     /* Button GPIOs (issue #22 Phase 2).  Init unconditionally — if no
      * buttons are wired, the pull-ups keep the lines high and the
      * GPIO IRQ never fires.  Safe even when the OLED itself is
      * absent: button events accumulate in their ring but the UI
      * task is a no-op so they're harmlessly discarded. */
     buttons_init();
+    /* Pairing model selection.  A working OLED+button UI gives the user
+     * a way to open a pairing window on demand ("Pair new"), so switch
+     * to opt-in pairing — that's what makes "Forget" stick.  With NO
+     * panel present there's no way to open the window, so leave auto-
+     * pairing on (the 1.0.0 / lite behaviour) and the device stays
+     * usable headless.  One firmware image, behaviour chosen at runtime
+     * from whether a panel actually answered on the I2C bus. */
+    bt_hid_host_le_set_auto_pair(!oled_present);
 #endif
 #endif
 

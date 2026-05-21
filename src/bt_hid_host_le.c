@@ -229,10 +229,29 @@ static bool     le_pairing_open       = false;
 static uint64_t le_pairing_open_until = 0;
 #define LE_PAIRING_WINDOW_US (65ull * 1000000ull)  /* > UI's 60 s window */
 
+/* Always-on auto-pairing.  DEFAULT TRUE so a headless / lite build
+ * (no LCD UI) behaves like 1.0.0: any HID device that advertises while
+ * a slot is free gets paired.  The LCD UI disables this at boot — but
+ * ONLY when it confirms a panel is actually present (see setup.c).  So:
+ *   - lite build / no panel  → auto_pair stays true  → auto-pair
+ *   - OLED build + panel     → auto_pair set false    → opt-in pairing
+ * Pairing is permitted when (le_auto_pair || le_pairing_open). */
+static bool le_auto_pair = true;
+
+void bt_hid_host_le_set_auto_pair(bool enable) {
+    le_auto_pair = enable;
+    printf("[ble] auto-pair %s\n", enable ? "ON (headless/lite)" : "off (opt-in via UI)");
+}
+
 void bt_hid_host_le_set_pairing_open(bool open) {
     le_pairing_open = open;
     le_pairing_open_until = open ? (time_us_64() + LE_PAIRING_WINDOW_US) : 0;
     printf("[ble] pairing window %s\n", open ? "OPEN" : "closed");
+}
+
+/* Pairing currently permitted for a NEW (unbonded) device? */
+static inline bool le_pairing_permitted(void) {
+    return le_auto_pair || le_pairing_open;
 }
 
 /* True if `addr` is already in our bond DB, i.e. a reconnect rather than
@@ -445,6 +464,10 @@ static void le_hids_client_event_handler(uint8_t packet_type, uint16_t channel,
                                          uint8_t *packet, uint16_t size);
 static void le_handle_input_report(uint16_t hids_cid, uint8_t service_index,
                                    const uint8_t *report, uint16_t report_len);
+#ifdef DH_OLED_UI
+static void le_gap_name_handler(uint8_t packet_type, uint16_t channel,
+                                uint8_t *packet, uint16_t size);
+#endif
 
 /* ---- helpers ------------------------------------------------------- */
 
@@ -690,6 +713,53 @@ static void le_handle_input_report(uint16_t hids_cid, uint8_t service_index,
     }
 }
 
+#ifdef DH_OLED_UI
+/* ---- GAP Device Name (0x2A00) reader ---------------------------------
+ * Some peripherals (e.g. the 8BitDo keyboard) don't put their friendly
+ * name in their connectable advertising payload — only the Logitech-
+ * style ones (MX Master) do.  The GAP Device Name characteristic is
+ * mandatory on every BLE peripheral, so after the HID service is up we
+ * read it over GATT to fill in any name the adv didn't give us.  Only
+ * issued when the name cache has nothing for the device, so it costs a
+ * single extra read per never-before-named device and nothing on
+ * reconnect (the persisted name is already cached). */
+static void le_gap_name_handler(uint8_t packet_type, uint16_t channel,
+                                uint8_t *packet, uint16_t size) {
+    (void)channel; (void)size;
+    if (packet_type != HCI_EVENT_PACKET) return;
+    if (hci_event_packet_get_type(packet) != GATT_EVENT_CHARACTERISTIC_VALUE_QUERY_RESULT)
+        return;
+
+    hci_con_handle_t h   = gatt_event_characteristic_value_query_result_get_handle(packet);
+    const uint8_t   *val = gatt_event_characteristic_value_query_result_get_value(packet);
+    uint16_t         len = gatt_event_characteristic_value_query_result_get_value_length(packet);
+    if (len == 0) return;
+    if (len >= BT_EVT_NAME_MAX) len = BT_EVT_NAME_MAX - 1;
+
+    char name[BT_EVT_NAME_MAX];
+    memcpy(name, val, len);
+    name[len] = '\0';
+
+    /* Map the connection handle back to the device address. */
+    for (int i = 0; i < le_num_active; i++) {
+        if (le_active[i].con_handle != h) continue;
+        le_name_cache_put(le_active[i].addr, name);
+        le_bnam_put(le_active[i].addr, name);   /* persist for next boot */
+        bt_event_t e = {
+            .type      = BT_EVT_DEVICE_NAME_RESOLVED,
+            .transport = BT_TRANSPORT_LE,
+            .ts_us     = time_us_64(),
+        };
+        bt_evt_addr_from_bd(&e.addr, le_active[i].addr);
+        strncpy(e.name, name, BT_EVT_NAME_MAX - 1);
+        e.name[BT_EVT_NAME_MAX - 1] = '\0';
+        bt_events_publish(&e);
+        printf("[ble] GAP device name resolved: \"%s\"\n", name);
+        break;
+    }
+}
+#endif /* DH_OLED_UI */
+
 /* ---- hids_client event handler ----------------------------------- */
 
 static void le_hids_client_event_handler(uint8_t packet_type, uint16_t channel,
@@ -764,6 +834,20 @@ static void le_hids_client_event_handler(uint8_t packet_type, uint16_t channel,
                        kind == BT_KIND_KEYBOARD ? "keyboard" :
                        kind == BT_KIND_MOUSE    ? "mouse" :
                        kind == BT_KIND_KEYPAD   ? "keypad" : "unknown");
+
+                /* If the adv didn't give us a name (e.g. 8BitDo only
+                 * exposes it via GATT, not in the adv payload), read the
+                 * mandatory GAP Device Name characteristic over GATT now
+                 * that hids_client has finished its discovery and the
+                 * connection is idle.  The result patches the name into
+                 * the cache + persists it + fires NAME_RESOLVED so the
+                 * UI updates. */
+                if (le_name_cache_get(le_remote.addr)[0] == '\0') {
+                    gatt_client_read_value_of_characteristics_by_uuid16(
+                        &le_gap_name_handler, le_connection_handle,
+                        0x0001, 0xffff,
+                        ORG_BLUETOOTH_CHARACTERISTIC_GAP_DEVICE_NAME);
+                }
             }
 #endif
             /* Persist this device address for fast direct-reconnect on
@@ -852,7 +936,7 @@ static void le_sm_packet_handler(uint8_t packet_type, uint16_t channel,
              * silently re-pairing.  The pre-connect adv filter should
              * already have skipped it, but declining here is the
              * authoritative gate. */
-            if (!le_pairing_open) {
+            if (!le_pairing_permitted()) {
                 printf("[ble] just-works request but pairing CLOSED — declining\n");
                 sm_bonding_decline(sm_event_just_works_request_get_handle(packet));
                 break;
@@ -1081,7 +1165,7 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
              * on the LCD).  Bonded devices reconnect regardless.  This
              * is what makes "Forget" stick — a forgotten device that's
              * still advertising won't silently re-pair. */
-            if (!le_pairing_open &&
+            if (!le_pairing_permitted() &&
                 !le_addr_is_bonded(adv_addr,
                                    gap_event_advertising_report_get_address_type(packet))) {
                 break;  /* unknown device, pairing closed → ignore */
