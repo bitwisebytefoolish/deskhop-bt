@@ -31,15 +31,18 @@ cmake_minimum_required(VERSION 3.13)
 ## UP/DOWN), "- free" empty-slot label, +2 px name padding, no menu
 ## underline, and a ping-pong "scanning" dot in the pair-new flow.
 ##
+## 1.2.1 (v1.2.1-bt): adds an About screen (main-menu item) showing the
+## title, version, build date, author, and fork credit.
+##
 ## FIRMWARE_VERSION (used in OTA compatibility checks) computes as
-## MAJOR*1000 + MINOR*10 + PATCH + 100 = 1120 here — strictly greater than
-## 1.1.1's 1111, so the upstream A/B OTA version comparison still orders
+## MAJOR*1000 + MINOR*10 + PATCH + 100 = 1121 here — strictly greater than
+## 1.2.0's 1120, so the upstream A/B OTA version comparison still orders
 ## correctly.  (The formula gained the *10 / +PATCH terms when the patch
 ## component was introduced; pre-1.1.1 releases predate it and keep their
 ## already-flashed values — only the ordering matters for OTA.)
 set(VERSION_MAJOR 1)
 set(VERSION_MINOR 2)
-set(VERSION_PATCH 0)
+set(VERSION_PATCH 1)
 
 ## Build date for the OLED About screen (ISO yyyy-mm-dd).  Captured at
 ## configure time; a release always reconfigures (CMakeLists changes with
