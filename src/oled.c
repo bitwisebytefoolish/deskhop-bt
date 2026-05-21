@@ -220,6 +220,14 @@ bool oled_init(void) {
 #ifndef OLED_COMSCAN
 #define OLED_COMSCAN 0xC8
 #endif
+    /* MEMORYMODE: 0x02 = page addressing.  Horizontal mode (0x00) is
+     * shorter to flush in theory (one giant write) but pegs us to
+     * SSD1306-only behaviour — the SH1106 controller commonly sold
+     * as "SSD1306" on Hosyond / AliExpress 0.96" boards silently
+     * ignores the column-window commands (0x21, 0x22) and ends up
+     * with a drifting column pointer.  Page mode is supported
+     * identically on both chips and makes the per-frame addressing
+     * explicit.  See oled_flush() for the per-page reset. */
     static const uint8_t init_seq[] = {
         0xAE,             /* DISPLAYOFF */
         0xD5, 0x80,       /* SETDISPLAYCLOCKDIV: oscillator freq */
@@ -227,7 +235,7 @@ bool oled_init(void) {
         0xD3, 0x00,       /* SETDISPLAYOFFSET: 0 */
         0x40,             /* SETSTARTLINE | 0 */
         0x8D, 0x14,       /* CHARGEPUMP: enable */
-        0x20, 0x00,       /* MEMORYMODE: horizontal addressing */
+        0x20, 0x02,       /* MEMORYMODE: page addressing */
         OLED_SEGREMAP,    /* segment remap (orientation knob) */
         OLED_COMSCAN,     /* COM scan direction (orientation knob) */
         0xDA, OLED_COMPINS, /* SET COMPINS (panel-variant knob) */
@@ -301,44 +309,68 @@ void oled_text(int x_pixels, int row, const char *s) {
     }
 }
 
+/* Some controllers sold as "SSD1306" are actually SH1106 — pin-compatible
+ * but with 132-column internal RAM (vs SSD1306's 128).  Panel pixels 0..127
+ * map to RAM columns OLED_COL_OFFSET..(OLED_COL_OFFSET+127):
+ *
+ *   SSD1306 (128 RAM cols): offset = 0; trivial
+ *   SH1106  (132 RAM cols): offset = 2; panel columns 0-127 use RAM 2-129
+ *
+ * Wrong offset symptom: content shifted left by N columns + N columns of
+ * stray pixels on the right (the off-screen RAM cells are never written,
+ * leaving stale content from boot — looks like vertical noise).
+ *
+ * Default 2 (SH1106 assumption) because the Phase 1 hardware test on a
+ * Hosyond "SSD1306" panel showed exactly that signature.  Override to 0
+ * for known-genuine SSD1306. */
+#ifndef OLED_COL_OFFSET
+#define OLED_COL_OFFSET 2
+#endif
+
 void oled_flush(void) {
     if (!panel_present) return;
 
-    /* Set column window [0, 127] and page window [0, 7] explicitly each
-     * flush — defensive; the panel should retain horizontal-mode
-     * addressing across flushes, but a power glitch or stray command
-     * could leave it elsewhere.  Cheap insurance (6 bytes per flush). */
-    static const uint8_t window[] = {
-        0x21, 0x00, 0x7F,   /* SETCOLUMNADDR start=0 end=127 */
-        0x22, 0x00, 0x07,   /* SETPAGEADDR   start=0 end=7   */
-    };
-    if (!i2c_cmd_seq(window, sizeof(window))) return;
+    /* Page-by-page flush.  For each of the 8 pages we:
+     *   1. Reset page index + column index explicitly (defends against
+     *      a drifted pointer from a previous frame or a glitched
+     *      transmission).
+     *   2. Stream 128 data bytes for that page.
+     *
+     * Compared to horizontal-addressing mode's one-shot 1024-byte write,
+     * this trades 8 small I2C transactions for robustness across
+     * controller variants (SSD1306 and SH1106 both honour page mode
+     * identically; horizontal mode is SSD1306-only).  Each page
+     * transaction is ~3 ms at 400 kHz — well under any reasonable
+     * timeout.  Total flush wall time ~25 ms, comparable to horizontal
+     * mode, with the bonus that a stalled per-page transaction only
+     * loses 1 page of data instead of the rest of the frame.
+     *
+     * The column offset (0 for SSD1306, 2 for SH1106) is applied via
+     * the SET LOWER/UPPER COLUMN commands; the data stream itself is
+     * always exactly 128 bytes per page. */
+    for (int page = 0; page < OLED_PAGES; page++) {
+        uint8_t col_lo = (uint8_t)(OLED_COL_OFFSET & 0x0F);
+        uint8_t col_hi = (uint8_t)((OLED_COL_OFFSET >> 4) & 0x0F);
+        uint8_t page_cmds[] = {
+            (uint8_t)(0xB0u | (uint8_t)page),  /* SET PAGE START ADDRESS */
+            (uint8_t)(0x00u | col_lo),         /* SET LOWER COLUMN START */
+            (uint8_t)(0x10u | col_hi),         /* SET UPPER COLUMN START */
+        };
+        if (!i2c_cmd_seq(page_cmds, sizeof(page_cmds))) return;
 
-    /* Stream the framebuffer.  0x40 control byte tells the panel
-     * "what follows is data (D/C# = 1), no more commands until
-     * the next control byte".  Standard SSD1306 idiom: one large
-     * burst rather than chunked transfers — fewer I2C STOP/START
-     * round-trips. */
-    uint8_t header = 0x40;
-    /* Use two writes back-to-back rather than concatenating into a
-     * stack buffer the size of the framebuffer (1 KB on stack would
-     * blow the 4 KB SCRATCH_Y budget).  i2c_write_timeout_us with
-     * nostop=true holds the bus open between calls. */
-    int rc = i2c_write_timeout_us(OLED_I2C_INSTANCE, OLED_I2C_ADDR,
-                                   &header, 1, true, 2000);
-    if (rc < 1) return;
-    /* Timeout 100 ms (was 30 ms).  A full framebuffer push of 1024 B at
-     * 400 kHz takes ~25 ms in the ideal case but breadboard jumpers add
-     * parasitic capacitance that triples the effective bit time, and
-     * any clock-stretch the panel itself does on internal RAM commits
-     * stacks on top.  The Phase 1 hardware test showed right-edge
-     * artifacts (last ~10 columns left as stale GDDRAM) consistent
-     * with the transmission being truncated by the 30 ms cap.  100 ms
-     * is comfortably above the worst case; the cost of a generous
-     * timeout when nothing's wrong is zero (we return as soon as the
-     * bytes are clocked out). */
-    i2c_write_timeout_us(OLED_I2C_INSTANCE, OLED_I2C_ADDR,
-                          fb, sizeof(fb), false, 100000);
+        /* Data write: 0x40 control byte = D/C#=1 (data); subsequent
+         * bytes go to GDDRAM at the just-set (page, column) and
+         * auto-increment column for each byte.  100 ms timeout is
+         * extravagant for a 128-byte transfer (~3 ms) but harmless
+         * — i2c_write_timeout_us returns when complete, not when
+         * the timeout expires. */
+        uint8_t header = 0x40;
+        int rc = i2c_write_timeout_us(OLED_I2C_INSTANCE, OLED_I2C_ADDR,
+                                       &header, 1, true, 2000);
+        if (rc < 1) return;
+        i2c_write_timeout_us(OLED_I2C_INSTANCE, OLED_I2C_ADDR,
+                              &fb[page * OLED_W], OLED_W, false, 20000);
+    }
 }
 
 void oled_set_contrast(uint8_t level) {
