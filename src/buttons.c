@@ -1,12 +1,23 @@
 /*
  * Button input implementation.  See src/include/buttons.h.
  *
- * IRQ-driven, with software debounce and on-release classification
- * (short click vs long press).  Designed for the 3-button UI on
- * board A (#22 Phase 2).
+ * Polled, not IRQ-driven.  buttons_task() is called once per UI frame
+ * (~30 Hz) and samples each pin's level.  Because the 33 ms sample
+ * period is far longer than a tactile switch's bounce (~1-15 ms),
+ * every sample is taken after the contact has settled — so bounce is
+ * filtered for free, with no edge-window debounce to tune.  This
+ * replaced an IRQ + edge-window design whose single time-window had
+ * to serve as both "reject bounce" and "minimum press duration",
+ * two requirements that conflict (too short lets bounce through; too
+ * long drops fast taps).
  *
- * Memory: 3 pins × per-button state (~24 B) + 8-slot ring (~96 B) =
- * <200 B in .bss.  Trivial.
+ * Classification:
+ *   - CLICK: emitted on RELEASE of a press shorter than LONG_PRESS_US.
+ *   - LONG : emitted the instant the hold crosses LONG_PRESS_US (while
+ *            still held) — gives immediate "you've held long enough"
+ *            feedback; the subsequent release emits nothing.
+ *
+ * Memory: 3 × per-button state + 8-slot ring ≈ 150 B in .bss.
  */
 
 #include "pico/stdlib.h"
@@ -27,31 +38,24 @@ static const uint8_t button_pins[BTN__COUNT] = {
     [BTN_SELECT] = UI_BUTTON_SELECT,
 };
 
-/* ---- Per-button state owned by the ISR ----------------------------- */
-
-#define DEBOUNCE_US       6000   /* 6 ms — ignore edges closer than this.
-                                  * Lower than the classic 20 ms because the
-                                  * event is emitted on RELEASE: with 20 ms a
-                                  * quick tap whose release edge fell inside
-                                  * the window got debounced away, so the
-                                  * button felt unresponsive to fast presses.
-                                  * 6 ms still comfortably rejects the 1-3 ms
-                                  * mechanical bounce of these tactiles. */
 #define LONG_PRESS_US   500000   /* 500 ms threshold for click-vs-long */
 
+/* ---- Per-button polled state -------------------------------------- */
+
 typedef struct {
-    uint64_t last_edge_us;   /* most recent edge timestamp, any direction */
-    uint64_t press_us;       /* timestamp of the active press, 0 if released */
+    bool     pressed;        /* debounced logical state (true = held down) */
+    uint64_t press_us;       /* time the current hold started */
+    bool     long_emitted;   /* a LONG event already fired for this hold */
 } button_state_t;
 
-static volatile button_state_t bs[BTN__COUNT];
+static button_state_t bs[BTN__COUNT];
 
 /* ---- Event ring ----------------------------------------------------- */
 
 #define BTN_RING_CAP 8
-static volatile button_event_t ring[BTN_RING_CAP];
-static volatile uint8_t        ring_head;  /* next slot to write */
-static volatile uint8_t        ring_tail;  /* next slot to read  */
+static button_event_t ring[BTN_RING_CAP];
+static uint8_t        ring_head;  /* next slot to write */
+static uint8_t        ring_tail;  /* next slot to read  */
 
 static void ring_push(button_id_t b, button_event_kind_t kind, uint64_t now) {
     uint8_t next_head = (uint8_t)((ring_head + 1) % BTN_RING_CAP);
@@ -66,74 +70,54 @@ static void ring_push(button_id_t b, button_event_kind_t kind, uint64_t now) {
     ring_head = next_head;
 }
 
-/* ---- IRQ handler --------------------------------------------------- */
-
-static int8_t pin_to_button(uint gpio) {
-    for (int i = 0; i < BTN__COUNT; i++) {
-        if (button_pins[i] == gpio) return (int8_t)i;
-    }
-    return -1;
-}
-
-static void gpio_irq_callback(uint gpio, uint32_t events) {
-    int8_t b = pin_to_button(gpio);
-    if (b < 0) return;  /* not one of our pins */
-
-    uint64_t now = time_us_64();
-
-    /* Software debounce: ignore edges arriving inside the chatter
-     * window of the previous edge on the same pin.  Mechanical
-     * tactiles bounce for 5-15 ms typically; 20 ms is comfortable. */
-    if (now - bs[b].last_edge_us < DEBOUNCE_US) return;
-    bs[b].last_edge_us = now;
-
-    if (events & GPIO_IRQ_EDGE_FALL) {
-        /* Press — record start time, don't emit yet. */
-        bs[b].press_us = now;
-    } else if (events & GPIO_IRQ_EDGE_RISE) {
-        /* Release — classify and emit.  Guard against release-without-
-         * preceding-press (can happen if the first edge after boot is
-         * a rising one because the pin was already low). */
-        if (bs[b].press_us == 0) return;
-        uint64_t held = now - bs[b].press_us;
-        bs[b].press_us = 0;
-        ring_push((button_id_t)b,
-                  (held >= LONG_PRESS_US) ? BTN_EVT_LONG : BTN_EVT_CLICK,
-                  now);
-    }
-}
-
 /* ---- Public API ---------------------------------------------------- */
 
 void buttons_init(void) {
-    /* Reset state in case of warm boot. */
     for (int i = 0; i < BTN__COUNT; i++) {
-        bs[i].last_edge_us = 0;
+        bs[i].pressed      = false;
         bs[i].press_us     = 0;
+        bs[i].long_emitted = false;
     }
     ring_head = ring_tail = 0;
 
-    /* Set up each pin: input, pull-up, IRQ on both edges.
-     * gpio_set_irq_enabled_with_callback registers ONE global callback
-     * for all GPIO IRQs — we install it on the first iteration, then
-     * use the cheaper enable-only variant for the rest. */
+    /* Each pin: input, pull-up on, pull-down explicitly off.  No IRQ —
+     * buttons_task() polls these. */
     for (int i = 0; i < BTN__COUNT; i++) {
         uint8_t pin = button_pins[i];
         gpio_init(pin);
         gpio_set_dir(pin, GPIO_IN);
-        /* Explicit pull config: pull-up ON, pull-down OFF.  Equivalent
-         * to gpio_pull_up() but states the pull-down=false intent
-         * directly — guards against any prior config leaving a
-         * pull-down latched, which would fight the pull-up and leave
-         * the pin near ground. */
         gpio_set_pulls(pin, true, false);
-        if (i == 0) {
-            gpio_set_irq_enabled_with_callback(pin,
-                GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE,
-                true, &gpio_irq_callback);
-        } else {
-            gpio_set_irq_enabled(pin,
-                GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true);
+    }
+}
+
+void buttons_task(void) {
+    uint64_t now = time_us_64();
+    for (int b = 0; b < BTN__COUNT; b++) {
+        /* Active-low: pull-up holds the line high at rest; a press
+         * shorts it to GND.  raw_down == true means "button held". */
+        bool raw_down = !gpio_get(button_pins[b]);
+
+        if (raw_down && !bs[b].pressed) {
+            /* Edge: released → pressed.  Start timing; emit nothing
+             * yet (we don't know click vs long until release or until
+             * the long threshold elapses). */
+            bs[b].pressed      = true;
+            bs[b].press_us     = now;
+            bs[b].long_emitted = false;
+        } else if (!raw_down && bs[b].pressed) {
+            /* Edge: pressed → released.  Emit a CLICK only if we
+             * haven't already fired a LONG for this hold. */
+            bs[b].pressed = false;
+            if (!bs[b].long_emitted) {
+                ring_push((button_id_t)b, BTN_EVT_CLICK, now);
+            }
+        } else if (raw_down && bs[b].pressed && !bs[b].long_emitted) {
+            /* Still held — fire LONG the instant we cross the
+             * threshold, for immediate feedback. */
+            if (now - bs[b].press_us >= LONG_PRESS_US) {
+                bs[b].long_emitted = true;
+                ring_push((button_id_t)b, BTN_EVT_LONG, now);
+            }
         }
     }
 }

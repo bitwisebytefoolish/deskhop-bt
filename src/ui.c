@@ -521,6 +521,9 @@ void ui_render_task(device_t *state) {
      * a flurry of UP presses then a SELECT should resolve to the
      * post-SELECT screen, not flash through every intermediate
      * cursor position. */
+    /* Sample buttons (polled debounce — the 30 Hz cadence is the
+     * debounce), then drain any events the sample produced. */
+    buttons_task();
     button_event_t bev;
     while (buttons_poll(&bev)) {
         handle_button_event(&bev);

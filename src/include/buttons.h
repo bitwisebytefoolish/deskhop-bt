@@ -47,9 +47,14 @@ typedef struct {
     uint64_t            release_us;  /* time_us_64() at the rising edge */
 } button_event_t;
 
-/* Init GPIO pins (pull-up, both-edge IRQ), zero the event ring.
- * Safe to call once at boot from setup.c. */
+/* Init GPIO pins (input, pull-up), zero the event ring.  Safe to call
+ * once at boot from setup.c. */
 void buttons_init(void);
+
+/* Sample all buttons and enqueue any click / long-press events.  Call
+ * once per UI frame (~30 Hz) — the sample period doubles as the
+ * debounce, so it must be called at a steady cadence. */
+void buttons_task(void);
 
 /* Pop one event off the queue.  Returns true if *out was populated.
  * FIFO order.  Called from the UI task. */
@@ -59,6 +64,7 @@ bool buttons_poll(button_event_t *out);
 
 typedef struct { int _unused; } button_event_t;
 static inline void buttons_init(void) {}
+static inline void buttons_task(void) {}
 static inline bool buttons_poll(button_event_t *out) { (void)out; return false; }
 
 #endif
