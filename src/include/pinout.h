@@ -60,3 +60,41 @@
 
 #define SERIAL_RX_PIN (global_state.board_role == OUTPUT_A ? BOARD_A_RX : BOARD_B_RX)
 #define SERIAL_TX_PIN (global_state.board_role == OUTPUT_A ? BOARD_A_TX : BOARD_B_TX)
+
+/*==============================================================================
+ *  OLED + button harness (board A only; BT host UI — see issue #22)
+ *
+ *  These pins are jumper-wired from board A to a breadboard that carries
+ *  a Hosyond 0.96" SSD1306 OLED (128x64, I2C) and three momentary buttons.
+ *  Selected from the unused-on-board-A GPIO set so no carrier mod is
+ *  required beyond the existing GP18->GND role autoprobe.
+ *
+ *  Pin selection rationale:
+ *   - GP0/GP1 are I2C0's first SDA/SCL pair, at the corner of the Pico
+ *     for short jumper runs.
+ *   - GP19-21 are three consecutive unused GPIOs on the opposite edge;
+ *     a single IRQ callback dispatches all three.
+ *   - GP22 is reserved for a future fourth (BACK) button if the 3-button
+ *     long-press-back UX proves clunky.
+ *
+ *  Activated only when DH_OLED_UI is defined at build time (see
+ *  CMakeLists.txt).  If the OLED never ACKs at boot, the UI task no-ops
+ *  and the existing bt_hid_stage LED indicator remains the source of
+ *  truth.  Wiring this on a Pico (RP2040) build is a no-op since the
+ *  BT host only runs on the Pico 2 W.
+ *==============================================================================*/
+
+#ifdef DH_OLED_UI
+/* I2C bus and pins for the SSD1306 panel. */
+#define OLED_I2C_INSTANCE  i2c0
+#define OLED_I2C_BAUD      400000  /* 400 kHz fast-mode; ~25 ms per full flush */
+#define OLED_PIN_SDA       0
+#define OLED_PIN_SCL       1
+#define OLED_I2C_ADDR      0x3C    /* 7-bit; some panels are 0x3D */
+
+/* Button GPIOs (active-low: external press shorts to GND, internal pull-up). */
+#define UI_BUTTON_UP       19
+#define UI_BUTTON_DOWN     20
+#define UI_BUTTON_SELECT   21
+/* GP22 reserved for an optional 4th BACK button (Phase 4). */
+#endif
