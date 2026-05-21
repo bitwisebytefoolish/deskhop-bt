@@ -221,14 +221,27 @@ bool oled_init(void) {
      *   - rows split into two halves     → try OLED_COMPINS=0x22 or 0x32
      */
 #ifndef OLED_COMPINS
-/* 0x02 chosen as default after the Phase 1 hardware test on the Hosyond
- * 0.96" panel rendered with the rows in a circular-shifted order under
- * the previous 0x12 default — exactly the symptom of an alternative-
- * vs-sequential COM pin mismatch.  0x02 (sequential) is also the most
- * common value for cheap 0.96" boards from generic AliExpress / Amazon
- * vendors.  Override to 0x12, 0x22, or 0x32 if your specific panel
- * needs the alternative or remapped variants. */
-#define OLED_COMPINS 0x02
+/* Default 0x12 matches DonCon2040 / pico_ssd1306's heuristic for 128x64
+ * panels (width > 2*height → 0x02 for 128x32 strips; else 0x12 for
+ * square-ish 128x64).  This is also Adafruit's reference value.
+ *
+ * Earlier hardware tests in this PR experimented with 0x02 as a default
+ * after the very first photo showed rows in a circular-shifted order
+ * (6,7,0,1,2,3).  That symptom turned out to be I2C transfer truncation,
+ * not a COMPINS mismatch — fixed properly by the DonCon-style
+ * single-transaction blocking write.  With that fix in place, 0x02
+ * causes the panel to use only 32 of its 64 COM lines and DOUBLE each
+ * row vertically — visible as characters looking ~16 px tall and only
+ * the top half of the framebuffer being displayed.
+ *
+ * Symptom-to-knob map:
+ *   - characters look 2x tall, only top half of layout visible:
+ *       wrong COMPINS — try the other (0x02 ↔ 0x12)
+ *   - rows displayed in a circular-shifted order:
+ *       I2C transfer truncation — not a COMPINS issue
+ *   - rows interleaved (every other row from each half):
+ *       try 0x22 or 0x32 (the remapped variants) */
+#define OLED_COMPINS 0x12
 #endif
 #ifndef OLED_SEGREMAP
 #define OLED_SEGREMAP 0xA1
