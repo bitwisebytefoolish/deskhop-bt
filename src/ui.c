@@ -48,9 +48,10 @@ typedef enum {
     UI_STATE_PAIR_NEW           = 4,
     UI_STATE_CONFIRM_FORGET     = 5,
     UI_STATE_CONFIRM_FORGET_ALL = 6,
+    UI_STATE_ABOUT              = 7,
 } ui_state_t;
 
-enum { MENU_DEVICES = 0, MENU_PAIR_NEW = 1, MENU_FORGET_ALL = 2, MENU__COUNT };
+enum { MENU_DEVICES = 0, MENU_PAIR_NEW = 1, MENU_FORGET_ALL = 2, MENU_ABOUT = 3, MENU__COUNT };
 enum { INFO_BACK = 0, INFO_FORGET = 1, INFO__COUNT };
 enum { CONFIRM_CANCEL = 0, CONFIRM_YES = 1, CONFIRM__COUNT };
 
@@ -137,6 +138,14 @@ static void fmt_addr_short(char *out, size_t n, const uint8_t addr[6]) {
 static void fmt_addr_full(char *out, size_t n, const uint8_t addr[6]) {
     snprintf(out, n, "%02x:%02x:%02x:%02x:%02x:%02x",
              addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+}
+
+/* Draw a string horizontally centred on `row` (6 px/char, 128 px wide). */
+static void oled_text_centered(int row, const char *s) {
+    int w = (int)strlen(s) * 6;
+    int x = (OLED_W - w) / 2;
+    if (x < 0) x = 0;
+    oled_text(x, row, s);
 }
 
 /* Marquee for names longer than `win` columns.  Writes the substring to
@@ -307,6 +316,7 @@ static const char *MAIN_MENU_LABELS[MENU__COUNT] = {
     [MENU_DEVICES]    = "Paired devices",
     [MENU_PAIR_NEW]   = "Pair new device",
     [MENU_FORGET_ALL] = "Forget all bonds",
+    [MENU_ABOUT]      = "About",
 };
 
 static void render_main_menu(void) {
@@ -504,6 +514,30 @@ static void render_confirm_forget_all(void) {
     render_confirm("Forget ALL bonds?", "every paired dev");
 }
 
+/* ---- Render: ABOUT -------------------------------------------------- */
+
+static void render_about(void) {
+    oled_clear();
+
+    oled_text_centered(0, "Deskhop:");
+    oled_text_centered(1, "Bluetooth Edition");
+
+    char ver[16];
+    snprintf(ver, sizeof(ver), "%d.%d.%d",
+             VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
+    oled_text_centered(2, ver);
+
+    /* Horizontal rule below the version (row 2 ends at y=23). */
+    for (int x = 0; x < OLED_W; x++) oled_set_pixel(x, 25, true);
+
+    oled_text_centered(4, "Built by M. Rossoni");
+    oled_text_centered(5, "Forked from hrvach's");
+    oled_text_centered(6, "deskhop. Thank you!");
+    oled_text_centered(7, "Build " BUILD_DATE);
+
+    oled_flush();
+}
+
 /* ---- Input handling ------------------------------------------------- */
 
 static void handle_button_event(const button_event_t *e) {
@@ -538,8 +572,16 @@ static void handle_button_event(const button_event_t *e) {
                         ui.state = UI_STATE_CONFIRM_FORGET_ALL;
                         ui.confirm_cursor = CONFIRM_CANCEL;
                         break;
+                    case MENU_ABOUT:
+                        ui.state = UI_STATE_ABOUT;
+                        break;
                 }
             }
+            break;
+
+        case UI_STATE_ABOUT:
+            /* Any SELECT (click or long-press) returns to the menu. */
+            if (sel_click || sel_long) ui.state = UI_STATE_MAIN_MENU;
             break;
 
         case UI_STATE_DEVICE_LIST:
@@ -744,6 +786,7 @@ void ui_render_task(device_t *state) {
         case UI_STATE_PAIR_NEW:           render_pair_new();           break;
         case UI_STATE_CONFIRM_FORGET:     render_confirm_forget();     break;
         case UI_STATE_CONFIRM_FORGET_ALL: render_confirm_forget_all(); break;
+        case UI_STATE_ABOUT:              render_about();              break;
         default:                          render_status(state->active_output); break;
     }
     ui.dirty = false;
