@@ -49,6 +49,7 @@ void bt_events_publish(const bt_event_t *evt) {
             if (slot >= 0) {
                 active[slot].addr      = evt->addr;
                 active[slot].transport = evt->transport;
+                active[slot].kind      = evt->kind;
                 active[slot].cid       = evt->cid;
                 active[slot].in_use    = true;
                 /* Initial name: whatever the event carried (often empty

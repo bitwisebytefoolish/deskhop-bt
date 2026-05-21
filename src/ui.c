@@ -211,12 +211,17 @@ static void render_status(uint8_t active_output) {
     for (int i = 0; i < BT_ACTIVE_CAP; i++) {
         int y = 20 + i * 8;   /* base shifted from 16 → 20 for the new divider gap */
         if (active[i].in_use) {
-            /* Device-type icon — for now, generic "device" glyph.
-             * Phase 3 work will populate a kind field on connect
-             * (parsed from the HID descriptor's app-usage page) so
-             * this can show distinct keyboard / mouse / keypad
-             * icons.  The icons are already defined in oled.h. */
-            oled_draw_icon(0, y, 8, 8, oled_icon_generic);
+            /* Device-type icon, chosen from the kind detected at connect
+             * time (parsed from the HID descriptor's top-level usage in
+             * bt_hid_host_le.c). */
+            const uint8_t *icon;
+            switch (active[i].kind) {
+                case BT_KIND_KEYBOARD: icon = oled_icon_kbd;    break;
+                case BT_KIND_MOUSE:    icon = oled_icon_mouse;  break;
+                case BT_KIND_KEYPAD:   icon = oled_icon_keypad; break;
+                default:               icon = oled_icon_generic; break;
+            }
+            oled_draw_icon(0, y, 8, 8, icon);
             /* Name (or address tail as fallback). */
             char line[22];
             if (active[i].name[0]) {

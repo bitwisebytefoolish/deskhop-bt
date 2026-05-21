@@ -54,11 +54,22 @@ typedef enum {
     BT_TRANSPORT_LE      = 1,
 } bt_evt_transport_t;
 
+/* Device class, derived from the HID report descriptor's top-level
+ * application usage (Generic Desktop page).  Drives which icon the
+ * status screen shows.  UNKNOWN falls back to a generic glyph. */
+typedef enum {
+    BT_KIND_UNKNOWN  = 0,
+    BT_KIND_KEYBOARD = 1,
+    BT_KIND_MOUSE    = 2,
+    BT_KIND_KEYPAD   = 3,
+} bt_evt_kind_t;
+
 #define BT_EVT_NAME_MAX 24
 
 typedef struct {
     bt_evt_type_t      type;
     bt_evt_transport_t transport;
+    bt_evt_kind_t      kind;       /* device class for icon selection */
     bt_evt_addr_t      addr;
     uint16_t           cid;        /* hids_cid (BLE) or HID connection (Classic) — 0 if N/A */
     uint8_t            status;     /* BTstack error code for *_FAILED */
@@ -81,6 +92,7 @@ typedef struct {
 typedef struct {
     bt_evt_addr_t      addr;
     bt_evt_transport_t transport;
+    bt_evt_kind_t      kind;
     char               name[BT_EVT_NAME_MAX];
     uint16_t           cid;
     bool               in_use;
