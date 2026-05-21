@@ -3,19 +3,26 @@ cmake_minimum_required(VERSION 3.13)
 ## Version Configuration.
 ## Define e.g. 0.72 as major 0 and minor 72
 ##
-## deskhop-bt 1.0.0 (release tag v1.0.0-bt): first numbered release of the
-## Bluetooth fork.  Inherits the upstream 0.77 codebase and adds Phase 0
-## board bring-up, BT Classic + BLE HOGP HID host on board A (Pico 2 W),
-## multi-device bonding, persistent bonds, cold-boot reconnect (PR #38),
-## and full fork documentation (PR #39).  See BLUETOOTH.md for the user
-## guide.
+## deskhop-bt 1.1.0 (release tag v1.1.0-bt): adds the SSD1306 OLED + button
+## device-management UI on board A (issue #22) on top of 1.0.0.  The UI is
+## compiled in by default for pico2_w (DH_OLED_UI) but is fully optional at
+## RUNTIME — if no panel ACKs on the I2C bus, the UI task no-ops and the
+## firmware behaves exactly like 1.0.0.  So this build is a strict superset:
+## flash it whether or not an OLED is wired.
+##
+## v1.0.0-bt stays the "lite" release for anyone who wants the BT host with
+## none of the OLED/button code compiled in.
+##
+## 1.0.0 (v1.0.0-bt, "lite"): first numbered release of the Bluetooth fork.
+## Inherits upstream 0.77; adds Phase 0 board bring-up, BT Classic + BLE
+## HOGP HID host on board A (Pico 2 W), multi-device bonding, persistent
+## bonds, cold-boot reconnect (PR #38), fork docs (PR #39).
 ##
 ## FIRMWARE_VERSION (used in OTA compatibility checks) computes as
-## MAJOR*1000 + MINOR + 100 = 1100 here — strictly greater than the
-## inherited 0.77's 177, so the upstream A/B OTA logic still works for
-## same-fork upgrades.
+## MAJOR*1000 + MINOR + 100 = 1101 here — strictly greater than 1.0.0's
+## 1100, so the upstream A/B OTA version comparison still orders correctly.
 set(VERSION_MAJOR 1)
-set(VERSION_MINOR 0)
+set(VERSION_MINOR 1)
 
 ## Release Type Selection
 option(DH_DEBUG "Build a debug version" OFF)
