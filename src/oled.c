@@ -25,10 +25,26 @@
 #include "pinout.h"
 #include <string.h>
 
-/* ---- Framebuffer ----------------------------------------------------- */
-
+/* ---- Framebuffer -----------------------------------------------------
+ *
+ * Allocated with ONE extra byte at the front so the I2C "data" control
+ * byte (0x40) can be written into fb_raw[0] and the whole {header, fb}
+ * blob can be transmitted in a single i2c_write_blocking() call.
+ *
+ * This trick is from the pico_ssd1306 library David Schramm
+ * (https://github.com/daschr/pico-ssd1306) — proven against many
+ * 0.96" panels including the ones in the DonCon2040 project, which
+ * use the exact same Hosyond-style modules we're targeting here.
+ * The alternative — two writes back-to-back with nostop=true — works
+ * on some panels and not others; some controllers can't recover the
+ * I2C bus state cleanly when the "address+control" and "data" come
+ * in separate START-less segments.
+ *
+ * Public framebuffer accessors operate on `fb`, which is byte 1
+ * onwards of `fb_raw`.  Byte 0 is owned by oled_flush(). */
 #define OLED_PAGES (OLED_H / 8)
-static uint8_t fb[OLED_PAGES * OLED_W];
+static uint8_t fb_raw[1 + OLED_PAGES * OLED_W];
+#define fb (&fb_raw[1])
 static bool    panel_present = false;
 
 /* ---- 6x8 monospace font, ASCII 0x20..0x7E ----------------------------
@@ -220,14 +236,19 @@ bool oled_init(void) {
 #ifndef OLED_COMSCAN
 #define OLED_COMSCAN 0xC8
 #endif
-    /* MEMORYMODE: 0x02 = page addressing.  Horizontal mode (0x00) is
-     * shorter to flush in theory (one giant write) but pegs us to
-     * SSD1306-only behaviour — the SH1106 controller commonly sold
-     * as "SSD1306" on Hosyond / AliExpress 0.96" boards silently
-     * ignores the column-window commands (0x21, 0x22) and ends up
-     * with a drifting column pointer.  Page mode is supported
-     * identically on both chips and makes the per-frame addressing
-     * explicit.  See oled_flush() for the per-page reset. */
+    /* MEMORYMODE: 0x00 = horizontal addressing.  Set column-window
+     * 0..127 + page-window 0..7 once per flush, then stream all
+     * 1024 framebuffer bytes in one I2C transaction.  Auto-increment
+     * goes across the row first, then wraps to the next page.  This
+     * matches what the upstream pico_ssd1306 library does and what
+     * the DonCon2040 project verified works on the Hosyond-style
+     * 0.96" panels we're targeting.
+     *
+     * A previous version of this driver experimented with page-mode
+     * addressing + an SH1106 column offset of 2.  That worked on
+     * paper for true SH1106 controllers, but it turned out our panel
+     * is a genuine SSD1306 — DonCon's horizontal-mode-with-blocking-
+     * write is correct for it. */
     static const uint8_t init_seq[] = {
         0xAE,             /* DISPLAYOFF */
         0xD5, 0x80,       /* SETDISPLAYCLOCKDIV: oscillator freq */
@@ -235,7 +256,7 @@ bool oled_init(void) {
         0xD3, 0x00,       /* SETDISPLAYOFFSET: 0 */
         0x40,             /* SETSTARTLINE | 0 */
         0x8D, 0x14,       /* CHARGEPUMP: enable */
-        0x20, 0x02,       /* MEMORYMODE: page addressing */
+        0x20, 0x00,       /* MEMORYMODE: horizontal addressing */
         OLED_SEGREMAP,    /* segment remap (orientation knob) */
         OLED_COMSCAN,     /* COM scan direction (orientation knob) */
         0xDA, OLED_COMPINS, /* SET COMPINS (panel-variant knob) */
@@ -254,7 +275,7 @@ bool oled_init(void) {
     /* Start with a black framebuffer + push it to clear any garbage
      * the panel might be holding in RAM from a previous session. */
     panel_present = true;
-    memset(fb, 0, sizeof(fb));
+    memset(fb, 0, (size_t)(OLED_PAGES * OLED_W));
     oled_flush();
     return true;
 }
@@ -264,7 +285,7 @@ bool oled_is_present(void) {
 }
 
 void oled_clear(void) {
-    memset(fb, 0, sizeof(fb));
+    memset(fb, 0, (size_t)(OLED_PAGES * OLED_W));
 }
 
 void oled_clear_row(int row) {
@@ -309,68 +330,39 @@ void oled_text(int x_pixels, int row, const char *s) {
     }
 }
 
-/* Some controllers sold as "SSD1306" are actually SH1106 — pin-compatible
- * but with 132-column internal RAM (vs SSD1306's 128).  Panel pixels 0..127
- * map to RAM columns OLED_COL_OFFSET..(OLED_COL_OFFSET+127):
- *
- *   SSD1306 (128 RAM cols): offset = 0; trivial
- *   SH1106  (132 RAM cols): offset = 2; panel columns 0-127 use RAM 2-129
- *
- * Wrong offset symptom: content shifted left by N columns + N columns of
- * stray pixels on the right (the off-screen RAM cells are never written,
- * leaving stale content from boot — looks like vertical noise).
- *
- * Default 2 (SH1106 assumption) because the Phase 1 hardware test on a
- * Hosyond "SSD1306" panel showed exactly that signature.  Override to 0
- * for known-genuine SSD1306. */
-#ifndef OLED_COL_OFFSET
-#define OLED_COL_OFFSET 2
-#endif
-
 void oled_flush(void) {
     if (!panel_present) return;
 
-    /* Page-by-page flush.  For each of the 8 pages we:
-     *   1. Reset page index + column index explicitly (defends against
-     *      a drifted pointer from a previous frame or a glitched
-     *      transmission).
-     *   2. Stream 128 data bytes for that page.
-     *
-     * Compared to horizontal-addressing mode's one-shot 1024-byte write,
-     * this trades 8 small I2C transactions for robustness across
-     * controller variants (SSD1306 and SH1106 both honour page mode
-     * identically; horizontal mode is SSD1306-only).  Each page
-     * transaction is ~3 ms at 400 kHz — well under any reasonable
-     * timeout.  Total flush wall time ~25 ms, comparable to horizontal
-     * mode, with the bonus that a stalled per-page transaction only
-     * loses 1 page of data instead of the rest of the frame.
-     *
-     * The column offset (0 for SSD1306, 2 for SH1106) is applied via
-     * the SET LOWER/UPPER COLUMN commands; the data stream itself is
-     * always exactly 128 bytes per page. */
-    for (int page = 0; page < OLED_PAGES; page++) {
-        uint8_t col_lo = (uint8_t)(OLED_COL_OFFSET & 0x0F);
-        uint8_t col_hi = (uint8_t)((OLED_COL_OFFSET >> 4) & 0x0F);
-        uint8_t page_cmds[] = {
-            (uint8_t)(0xB0u | (uint8_t)page),  /* SET PAGE START ADDRESS */
-            (uint8_t)(0x00u | col_lo),         /* SET LOWER COLUMN START */
-            (uint8_t)(0x10u | col_hi),         /* SET UPPER COLUMN START */
-        };
-        if (!i2c_cmd_seq(page_cmds, sizeof(page_cmds))) return;
+    /* Set column window [0, 127] and page window [0, 7].  Horizontal
+     * addressing mode + this window means subsequent data bytes
+     * auto-fill row-major across the entire display, wrapping back
+     * to (page 0, col 0) after 1024 bytes.  Set explicitly every
+     * flush — cheap (6 bytes), and defends against the panel having
+     * been left in some other addressing mode by a stray command
+     * (e.g. picotool's BOOTSEL handover, or a glitch on the bus). */
+    static const uint8_t window[] = {
+        0x21, 0x00, 0x7F,   /* SET COLUMN ADDR start=0 end=127 */
+        0x22, 0x00, 0x07,   /* SET PAGE   ADDR start=0 end=7   */
+    };
+    if (!i2c_cmd_seq(window, sizeof(window))) return;
 
-        /* Data write: 0x40 control byte = D/C#=1 (data); subsequent
-         * bytes go to GDDRAM at the just-set (page, column) and
-         * auto-increment column for each byte.  100 ms timeout is
-         * extravagant for a 128-byte transfer (~3 ms) but harmless
-         * — i2c_write_timeout_us returns when complete, not when
-         * the timeout expires. */
-        uint8_t header = 0x40;
-        int rc = i2c_write_timeout_us(OLED_I2C_INSTANCE, OLED_I2C_ADDR,
-                                       &header, 1, true, 2000);
-        if (rc < 1) return;
-        i2c_write_timeout_us(OLED_I2C_INSTANCE, OLED_I2C_ADDR,
-                              &fb[page * OLED_W], OLED_W, false, 20000);
-    }
+    /* Single-transaction data write.  fb_raw[0] is reserved for the
+     * 0x40 control byte (Co=0, D/C#=1 → "all subsequent bytes are
+     * GDDRAM data, no further control bytes").  fb_raw[1..1024]
+     * holds the actual framebuffer, which the public oled_*
+     * functions write through `fb`.
+     *
+     * Why blocking (no timeout): the prior timeout-based path with
+     * 30 ms / 100 ms caps was demonstrably truncating the transfer
+     * on the breadboard wiring — visible as stale pixels on the
+     * right edge of the display.  i2c_write_blocking has no internal
+     * cap; it returns when the bytes are clocked out OR the bus is
+     * truly stuck.  For a 1025-byte transfer at 400 kHz the expected
+     * wall time is ~23 ms with some jitter — comfortably bounded by
+     * the 30 Hz UI render task budget. */
+    fb_raw[0] = 0x40;
+    i2c_write_blocking(OLED_I2C_INSTANCE, OLED_I2C_ADDR,
+                       fb_raw, sizeof(fb_raw), false);
 }
 
 void oled_set_contrast(uint8_t level) {
