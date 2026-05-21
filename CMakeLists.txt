@@ -21,17 +21,23 @@ cmake_minimum_required(VERSION 3.13)
 ## 1.1.0 (v1.1.0-bt, OLED): adds the SSD1306 OLED + button UI (#22 Phase
 ## 1/2) — always-on status screen, menu navigation, device-type icons.
 ##
-## 1.2.0 (v1.2.0-bt): #22 Phase 3 — pair-new flow with countdown, forget
+## 1.1.1 (v1.1.1-bt): #22 Phase 3 — pair-new flow with countdown, forget
 ## device / forget all wired to real bond removal, persistent device-name
 ## metadata (TLV), opt-in pairing for OLED builds. Plus review fixes:
 ## forget clears the active list immediately, single-cell marquee ellipsis,
-## full-length GAP device names (read-by-handle, not Read-By-Type).
+## full-length GAP device names (read-by-handle, not Read-By-Type).  All of
+## this builds on the 1.1.0 OLED UI without changing the protocol or board
+## roles, so it's a patch release on the 1.1.x line.
 ##
 ## FIRMWARE_VERSION (used in OTA compatibility checks) computes as
-## MAJOR*1000 + MINOR + 100 = 1102 here — strictly greater than 1.1.0's
-## 1101, so the upstream A/B OTA version comparison still orders correctly.
+## MAJOR*1000 + MINOR*10 + PATCH + 100 = 1111 here — strictly greater than
+## 1.1.0's 1101, so the upstream A/B OTA version comparison still orders
+## correctly.  (The formula gained the *10 / +PATCH terms when the patch
+## component was introduced; pre-1.1.1 releases predate it and keep their
+## already-flashed values — only the ordering matters for OTA.)
 set(VERSION_MAJOR 1)
-set(VERSION_MINOR 2)
+set(VERSION_MINOR 1)
+set(VERSION_PATCH 1)
 
 ## Release Type Selection
 option(DH_DEBUG "Build a debug version" OFF)
@@ -245,6 +251,7 @@ target_compile_definitions(${binary}
     PRIVATE
     VERSION_MAJOR=${VERSION_MAJOR}
     VERSION_MINOR=${VERSION_MINOR}
+    VERSION_PATCH=${VERSION_PATCH}
     PIO_USB_USE_TINYUSB=${PIO_USE_TINYUSB}
     PIO_USB_DP_PIN_DEFAULT=${DP_PIN_DEFAULT}
     # We use cyw43_arch only for the LED and Bluetooth — not Wi-Fi.
@@ -308,8 +315,13 @@ endif()
 ## Build other file formats as well
 pico_add_extra_outputs(${binary})
 
-# For internal firmware use, to simplify comparison: 0.72 -> 172
-math(EXPR FIRMWARE_VERSION "${VERSION_MAJOR} * 1000 + ${VERSION_MINOR} + 100")
+# For internal firmware use, to simplify comparison: 0.72 -> 172.
+# MAJOR*1000 + MINOR*10 + PATCH + 100 keeps releases monotonically ordered
+# now that a PATCH component exists (e.g. 1.1.1 -> 1111 > 1.1.0's 1101).
+if(NOT DEFINED VERSION_PATCH)
+    set(VERSION_PATCH 0)
+endif()
+math(EXPR FIRMWARE_VERSION "${VERSION_MAJOR} * 1000 + ${VERSION_MINOR} * 10 + ${VERSION_PATCH} + 100")
 
 ## Post-Build Commands
 ## CRC32 / .section_metadata update — now runs on both rp2040 and rp2350
