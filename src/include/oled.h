@@ -73,6 +73,7 @@ extern const uint8_t oled_icon_keypad[8];
 extern const uint8_t oled_icon_generic[8];
 extern const uint8_t oled_icon_dot_full[8];
 extern const uint8_t oled_icon_dot_empty[8];
+extern const uint8_t oled_icon_bt[8];
 
 /* Push the in-RAM framebuffer to the panel.  ~25 ms at 400 kHz.  No-op
  * if the panel isn't present (oled_init returned false). */

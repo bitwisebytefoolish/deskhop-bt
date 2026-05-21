@@ -95,9 +95,16 @@ static struct {
     uint8_t    last_active_count;
     uint8_t    last_bonded_count;
     uint32_t   last_active_hash;
+    uint32_t   last_anim_phase;   /* BT-icon blink + name-marquee tick */
+
+    bool       radio_up;          /* BT_EVT_RADIO_UP seen — stop blinking */
 
     bool       dirty;
 } ui;
+
+/* Visible columns for a device name before the marquee kicks in.  Names
+ * longer than this scroll (see marquee()). */
+#define UI_NAME_COLS 16
 
 /* ---- Helpers -------------------------------------------------------- */
 
@@ -120,6 +127,43 @@ static void fmt_addr_short(char *out, size_t n, const uint8_t addr[6]) {
 static void fmt_addr_full(char *out, size_t n, const uint8_t addr[6]) {
     snprintf(out, n, "%02x:%02x:%02x:%02x:%02x:%02x",
              addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+}
+
+/* Marquee for names longer than `win` columns.  Writes the substring to
+ * draw this frame into `out`.  While more text remains to the right the
+ * final three cells show "..." as an overflow hint; once the tail is
+ * fully revealed the hint drops, the line holds for 2 s, then the cycle
+ * restarts from the left.  Purely time-driven (no per-name state) so all
+ * long names animate from one shared clock derived from `now`. */
+static void marquee(char *out, size_t outsz, const char *name, int win, uint64_t now) {
+    int len = (int)strlen(name);
+    if (len <= win) { snprintf(out, outsz, "%s", name); return; }
+
+    int      steps  = len - win;             /* shifts to reveal the tail */
+    uint64_t period = (uint64_t)steps + 2;   /* + 2 s hold at the end     */
+    uint64_t phase  = (now / 1000000ull) % period;
+
+    int  off;
+    bool ellipsis;
+    if (phase < (uint64_t)steps) { off = (int)phase; ellipsis = true;  }
+    else                         { off = steps;      ellipsis = false; }
+
+    char buf[40];
+    int  n = win;
+    if (n > (int)sizeof(buf) - 1) n = (int)sizeof(buf) - 1;
+    memcpy(buf, name + off, (size_t)n);
+    buf[n] = '\0';
+    if (ellipsis && win >= 3) { buf[win - 1] = '.'; buf[win - 2] = '.'; buf[win - 3] = '.'; }
+    snprintf(out, outsz, "%s", buf);
+}
+
+/* True if any visible name on the status screen needs the marquee — used
+ * to decide whether STATUS must redraw on the 1 Hz animation tick. */
+static bool status_has_long_name(const bt_active_entry_t *active) {
+    for (int i = 0; i < BT_ACTIVE_CAP; i++)
+        if (active[i].in_use && (int)strlen(active[i].name) > UI_NAME_COLS)
+            return true;
+    return false;
 }
 
 static uint8_t cursor_move(uint8_t cur, int delta, uint8_t count) {
@@ -175,6 +219,7 @@ static void enter_pair_new(void) {
 static void drain_bt_events(void) {
     bt_event_t evt;
     while (bt_events_poll(&evt)) {
+        if (evt.type == BT_EVT_RADIO_UP) { ui.radio_up = true; ui.dirty = true; }
         if (ui.state == UI_STATE_PAIR_NEW && !ui.pair_succeeded &&
             evt.type == BT_EVT_DEVICE_PAIRED) {
             ui.pair_succeeded       = true;
@@ -195,22 +240,31 @@ static void render_status(uint8_t active_output) {
     const bt_active_entry_t *active = bt_events_active_table();
     uint8_t active_count = bt_events_active_count();
     uint8_t bonded_count = bt_events_bonded_count();
+    uint64_t now = time_us_64();
 
     oled_clear();
 
     char letter[2] = { (active_output == 0) ? 'A' : 'B', '\0' };
     oled_text_at(0, 0, 2, letter);
 
+    /* BT status: a Bluetooth icon + a state word.  While the radio is
+     * still coming up the icon flashes at 1 Hz next to "init"; once
+     * BT_EVT_RADIO_UP arrives the icon goes solid and the word reflects
+     * connection state (ready / idle / empty). */
+    bool blink_on = ui.radio_up || (((now / 500000ull) & 1ull) == 0);
+    if (blink_on) oled_draw_icon(28, 0, 8, 8, oled_icon_bt);
+
     const char *bt_state;
-    if (active_count > 0)      bt_state = "BT: ready";
-    else if (bonded_count > 0) bt_state = "BT: idle";
-    else                       bt_state = "BT: empty";
-    oled_text_at(28, 0, 1, bt_state);
+    if (!ui.radio_up)          bt_state = "init";
+    else if (active_count > 0) bt_state = "ready";
+    else if (bonded_count > 0) bt_state = "idle";
+    else                       bt_state = "empty";
+    oled_text_at(40, 0, 1, bt_state);
 
     char counter[24];
-    snprintf(counter, sizeof(counter), "%u of %u bonded",
+    snprintf(counter, sizeof(counter), "%u of %u paired",
              active_count, bonded_count);
-    oled_text_at(28, 8, 1, counter);
+    oled_text_at(40, 8, 1, counter);
 
     for (int x = 0; x < OLED_W; x++) oled_set_pixel(x, 17, true);
 
@@ -218,8 +272,8 @@ static void render_status(uint8_t active_output) {
         int y = 20 + i * 8;
         if (active[i].in_use) {
             oled_draw_icon(0, y, 8, 8, icon_for_kind(active[i].kind));
-            char line[22];
-            if (active[i].name[0]) snprintf(line, sizeof(line), "%s", active[i].name);
+            char line[40];
+            if (active[i].name[0]) marquee(line, sizeof(line), active[i].name, UI_NAME_COLS, now);
             else                   fmt_addr_short(line, sizeof(line), active[i].addr.bytes);
             oled_text_at(10, y, 1, line);
             oled_draw_icon(120, y, 8, 8, oled_icon_dot_full);
@@ -287,8 +341,8 @@ static void render_device_list(void) {
         const bt_bond_info_t *b = &ui.bonds[idx];
 
         oled_draw_icon(8, row * 8, 8, 8, icon_for_kind(kind_for_addr(b->addr)));
-        char line[18];
-        if (b->name[0]) snprintf(line, sizeof(line), "%s", b->name);
+        char line[40];
+        if (b->name[0]) marquee(line, sizeof(line), b->name, UI_NAME_COLS, time_us_64());
         else            fmt_addr_short(line, sizeof(line), b->addr);
         oled_text(18, row, line);
         oled_draw_icon(120, row * 8, 8, 8,
@@ -609,11 +663,24 @@ void ui_render_task(device_t *state) {
 
     if (ui.state == UI_STATE_STATUS) {
         uint32_t active_hash = hash_active_table();
+        /* Animation phase forces a redraw on a sub-second cadence so the
+         * BT-icon blink (2 Hz while the radio comes up) and the name
+         * marquee (1 Hz when a name overflows) keep moving even when no
+         * BT state changed. */
+        uint64_t now = time_us_64();
+        const bt_active_entry_t *active = bt_events_active_table();
+        uint32_t anim_phase = 0;
+        if (!ui.radio_up)
+            anim_phase ^= (uint32_t)((now / 500000ull) & 1ull) | 0x10u;
+        if (status_has_long_name(active))
+            anim_phase ^= ((uint32_t)(now / 1000000ull) & 0xffffu) << 1;
+
         if (!ui.dirty &&
-            state->active_output     == ui.last_active_output &&
+            state->active_output      == ui.last_active_output &&
             bt_events_active_count()  == ui.last_active_count &&
             bt_events_bonded_count()  == ui.last_bonded_count &&
-            active_hash               == ui.last_active_hash) {
+            active_hash               == ui.last_active_hash &&
+            anim_phase                == ui.last_anim_phase) {
             return;
         }
         render_status(state->active_output);
@@ -621,6 +688,7 @@ void ui_render_task(device_t *state) {
         ui.last_active_count  = bt_events_active_count();
         ui.last_bonded_count  = bt_events_bonded_count();
         ui.last_active_hash   = active_hash;
+        ui.last_anim_phase    = anim_phase;
         ui.dirty              = false;
         return;
     }
@@ -634,6 +702,18 @@ void ui_render_task(device_t *state) {
         uint32_t h = fnv1a(ui.bonds, sizeof(bt_bond_info_t) * ui.bond_count)
                    ^ (uint32_t)((uint32_t)ui.bond_count << 1);
         if (h != ui.last_bonds_hash) { ui.last_bonds_hash = h; needs_redraw = true; }
+
+        /* Marquee tick: if any visible bond name overflows, redraw at
+         * 1 Hz so the scroll advances. */
+        if (ui.state == UI_STATE_DEVICE_LIST) {
+            bool any_long = false;
+            for (int i = 0; i < ui.bond_count; i++)
+                if ((int)strlen(ui.bonds[i].name) > UI_NAME_COLS) { any_long = true; break; }
+            if (any_long) {
+                uint32_t sec = (uint32_t)(time_us_64() / 1000000ull);
+                if (sec != ui.last_anim_phase) { ui.last_anim_phase = sec; needs_redraw = true; }
+            }
+        }
     }
     if (!needs_redraw) return;
 

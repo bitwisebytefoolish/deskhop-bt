@@ -440,6 +440,22 @@ const uint8_t oled_icon_dot_full[8] = {
 const uint8_t oled_icon_dot_empty[8] = {
     0x00, 0x1C, 0x22, 0x22, 0x22, 0x1C, 0x00, 0x00,
 };
+/* Bluetooth rune.  Column-major, bit 0 = top.  The classic glyph: a
+ * vertical stem (col 3) crossed by two pairs of diagonals forming the
+ * stacked triangles.
+ *
+ *   ...#....
+ *   ...##...
+ *   .#.#.#..
+ *   ..###...
+ *   ...#....
+ *   ..###...
+ *   .#.#.#..
+ *   ...##...
+ */
+const uint8_t oled_icon_bt[8] = {
+    0x00, 0x44, 0x28, 0xFF, 0xAA, 0x44, 0x00, 0x00,
+};
 
 void oled_flush(void) {
     if (!panel_present) return;
