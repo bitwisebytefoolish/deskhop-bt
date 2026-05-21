@@ -51,8 +51,8 @@ int main(void) {
      * gate on this; if the UART isn't physically connected, prints fan
      * out to nowhere harmlessly. */
     stdio_init_all();
-    printf("\n\n=== deskhop-bt boot (FW %u.%u, role=%s) ===\n",
-           VERSION_MAJOR, VERSION_MINOR,
+    printf("\n\n=== deskhop-bt boot (FW %u.%u.%u, role=%s) ===\n",
+           VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH,
 #ifdef DH_BT_HID_HOST_KBD
            "A (BT-host)"
 #else
