@@ -25,19 +25,21 @@ cmake_minimum_required(VERSION 3.13)
 ## device / forget all wired to real bond removal, persistent device-name
 ## metadata (TLV), opt-in pairing for OLED builds. Plus review fixes:
 ## forget clears the active list immediately, single-cell marquee ellipsis,
-## full-length GAP device names (read-by-handle, not Read-By-Type).  All of
-## this builds on the 1.1.0 OLED UI without changing the protocol or board
-## roles, so it's a patch release on the 1.1.x line.
+## full-length GAP device names (read-by-handle, not Read-By-Type).
+##
+## 1.2.0 (v1.2.0-bt): OLED UI polish — button-glyph hints (○ SELECT, ↑/↓
+## UP/DOWN), "- free" empty-slot label, +2 px name padding, no menu
+## underline, and a ping-pong "scanning" dot in the pair-new flow.
 ##
 ## FIRMWARE_VERSION (used in OTA compatibility checks) computes as
-## MAJOR*1000 + MINOR*10 + PATCH + 100 = 1111 here — strictly greater than
-## 1.1.0's 1101, so the upstream A/B OTA version comparison still orders
+## MAJOR*1000 + MINOR*10 + PATCH + 100 = 1120 here — strictly greater than
+## 1.1.1's 1111, so the upstream A/B OTA version comparison still orders
 ## correctly.  (The formula gained the *10 / +PATCH terms when the patch
 ## component was introduced; pre-1.1.1 releases predate it and keep their
 ## already-flashed values — only the ordering matters for OTA.)
 set(VERSION_MAJOR 1)
-set(VERSION_MINOR 1)
-set(VERSION_PATCH 1)
+set(VERSION_MINOR 2)
+set(VERSION_PATCH 0)
 
 ## Release Type Selection
 option(DH_DEBUG "Build a debug version" OFF)
