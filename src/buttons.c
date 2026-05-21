@@ -148,22 +148,37 @@ bool buttons_poll(button_event_t *out) {
     return true;
 }
 
-void buttons_debug_print(void) {
-    /* Raw line levels: with internal pull-ups, idle reads 1, a press
-     * to GND reads 0.  If a press never flips the level here, the
-     * problem is wiring (button not connected, wrong pin, no GND) —
-     * not the IRQ or queue.
+void buttons_debug_tick(void) {
+    /* Called every UI frame (~30 Hz).  Polls the raw pin levels and
+     * LATCHES whether each was ever seen low since the last printed
+     * report — the once-a-second print alone is too coarse to catch a
+     * brief button press, but polling at 30 Hz reliably samples a
+     * normal human press (50-200 ms low).
      *
-     * Edge counters: how many falling / rising edges the IRQ has seen
-     * per button.  If levels flip but these stay 0, the IRQ callback
-     * isn't being invoked (registration overridden, or IRQ not
-     * enabled on the pin).
-     *
-     * irq=total raw GPIO IRQ invocations; unmatched=IRQs whose GPIO
-     * wasn't one of ours (would indicate a shared-callback collision
-     * with another subsystem). */
-    printf("[btn] pins U/D/S=%d/%d/%d  fall=%lu/%lu/%lu  rise=%lu/%lu/%lu  irq=%lu unmatched=%lu\n",
+     * Decision matrix (compare seenlow vs the IRQ edge counters):
+     *   seenlow stays 0 on a press   -> WIRING.  The line never pulls
+     *       to GND: button not connected, wrong pin, or no ground
+     *       path.  The IRQ/queue are irrelevant until this flips.
+     *   seenlow flips 1 but fall=0   -> IRQ NOT FIRING.  The level
+     *       changes but the GPIO IRQ callback isn't invoked — our
+     *       gpio_set_irq_enabled_with_callback got displaced (a
+     *       later registrant on this core wins), or the IRQ was
+     *       disabled.  Fix = poll instead of IRQ, or re-register.
+     *   seenlow + fall both move but no [btn] event line elsewhere
+     *       -> debounce / queue / classification bug in this file. */
+    static uint8_t  seen_low[BTN__COUNT];
+    static uint32_t tick;
+
+    if (!gpio_get(UI_BUTTON_UP))     seen_low[BTN_UP]     = 1;
+    if (!gpio_get(UI_BUTTON_DOWN))   seen_low[BTN_DOWN]   = 1;
+    if (!gpio_get(UI_BUTTON_SELECT)) seen_low[BTN_SELECT] = 1;
+
+    if (++tick < 30) return;
+    tick = 0;
+
+    printf("[btn] now U/D/S=%d/%d/%d  seenlow=%d/%d/%d  fall=%lu/%lu/%lu  rise=%lu/%lu/%lu  irq=%lu unm=%lu\n",
            gpio_get(UI_BUTTON_UP), gpio_get(UI_BUTTON_DOWN), gpio_get(UI_BUTTON_SELECT),
+           seen_low[BTN_UP], seen_low[BTN_DOWN], seen_low[BTN_SELECT],
            (unsigned long)buttons_dbg_fall[BTN_UP],
            (unsigned long)buttons_dbg_fall[BTN_DOWN],
            (unsigned long)buttons_dbg_fall[BTN_SELECT],
@@ -172,6 +187,8 @@ void buttons_debug_print(void) {
            (unsigned long)buttons_dbg_rise[BTN_SELECT],
            (unsigned long)buttons_dbg_irq_total,
            (unsigned long)buttons_dbg_unmatched);
+
+    seen_low[BTN_UP] = seen_low[BTN_DOWN] = seen_low[BTN_SELECT] = 0;
 }
 
 #endif /* DH_OLED_UI */

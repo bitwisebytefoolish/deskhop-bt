@@ -533,13 +533,10 @@ void ui_render_task(device_t *state) {
         handle_button_event(&bev);
     }
 
-    /* Throttled raw-state dump for button bring-up (#22).  Once a
-     * second at 30 Hz.  Remove (or gate behind a flag) before merge. */
-    static uint32_t dbg_tick;
-    if (++dbg_tick >= 30) {
-        dbg_tick = 0;
-        buttons_debug_print();
-    }
+    /* Button bring-up diagnostics (#22).  Polls levels every frame
+     * (latching lows) and prints once a second.  Remove (or gate
+     * behind a flag) before merge. */
+    buttons_debug_tick();
 
     check_inactivity();
 
