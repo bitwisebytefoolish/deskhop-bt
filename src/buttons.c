@@ -129,7 +129,12 @@ void buttons_init(void) {
         uint8_t pin = button_pins[i];
         gpio_init(pin);
         gpio_set_dir(pin, GPIO_IN);
-        gpio_pull_up(pin);
+        /* Explicit pull config: pull-up ON, pull-down OFF.  Equivalent
+         * to gpio_pull_up() but states the pull-down=false intent
+         * directly — guards against any prior config leaving a
+         * pull-down latched, which would fight the pull-up and leave
+         * the pin near ground. */
+        gpio_set_pulls(pin, true, false);
         if (i == 0) {
             gpio_set_irq_enabled_with_callback(pin,
                 GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE,
@@ -138,6 +143,20 @@ void buttons_init(void) {
             gpio_set_irq_enabled(pin,
                 GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true);
         }
+    }
+
+    /* One-time readback so the UART log proves the firmware-side pull
+     * config actually took.  If this prints pu=1 pd=0 for every pin
+     * but a multimeter still reads ~0 V at idle, the pull-down is
+     * external (wiring) — not us.  If it prints pu=0, the pico-sdk
+     * call didn't stick and the bug is here. */
+    for (int i = 0; i < BTN__COUNT; i++) {
+        uint8_t pin = button_pins[i];
+        printf("[btn] init pin GP%u: dir=in pu=%d pd=%d level=%d\n",
+               pin,
+               gpio_is_pulled_up(pin),
+               gpio_is_pulled_down(pin),
+               gpio_get(pin));
     }
 }
 
