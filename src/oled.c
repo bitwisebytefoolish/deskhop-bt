@@ -185,14 +185,41 @@ bool oled_init(void) {
         return false;
     }
 
-    /* Boot sequence — canonical SSD1306 128x64 init for charge-pump
-     * powered modules (the standard Hosyond / Adafruit / generic
-     * AliExpress 0.96" boards).
+    /* Boot sequence — SSD1306 128x64 init for charge-pump powered modules.
      *
-     * Each entry is one byte; descending order matches the datasheet
-     * "Initialisation" example flow.  Adjacent two-byte entries
-     * (e.g. SET_MULTIPLEX 0xA8, 0x3F) must NOT have anything between
-     * them — they form a single logical command. */
+     * Panel-variant overrides: cheap 0.96" SSD1306 modules from different
+     * vendors solder the COM-pin matrix differently and expect different
+     * register values.  Three knobs are exposed as build-time overrides
+     * so we can iterate on display orientation without touching this
+     * file:
+     *
+     *   -DOLED_COMPINS=0x02  — sequential COM pin config (vs. 0x12 alt)
+     *   -DOLED_SEGREMAP=0xA0 — column 0 → SEG0 (vs. 0xA1 column 127→SEG0)
+     *   -DOLED_COMSCAN=0xC0  — COM scan increasing (vs. 0xC8 decreasing)
+     *
+     * Defaults below work for most Adafruit / generic 128x64 panels.
+     * Symptoms of mismatch:
+     *   - rows displayed in wrong order  → try OLED_COMPINS=0x02
+     *   - text upside-down               → flip OLED_COMSCAN
+     *   - text mirrored left-right       → flip OLED_SEGREMAP
+     *   - rows split into two halves     → try OLED_COMPINS=0x22 or 0x32
+     */
+#ifndef OLED_COMPINS
+/* 0x02 chosen as default after the Phase 1 hardware test on the Hosyond
+ * 0.96" panel rendered with the rows in a circular-shifted order under
+ * the previous 0x12 default — exactly the symptom of an alternative-
+ * vs-sequential COM pin mismatch.  0x02 (sequential) is also the most
+ * common value for cheap 0.96" boards from generic AliExpress / Amazon
+ * vendors.  Override to 0x12, 0x22, or 0x32 if your specific panel
+ * needs the alternative or remapped variants. */
+#define OLED_COMPINS 0x02
+#endif
+#ifndef OLED_SEGREMAP
+#define OLED_SEGREMAP 0xA1
+#endif
+#ifndef OLED_COMSCAN
+#define OLED_COMSCAN 0xC8
+#endif
     static const uint8_t init_seq[] = {
         0xAE,             /* DISPLAYOFF */
         0xD5, 0x80,       /* SETDISPLAYCLOCKDIV: oscillator freq */
@@ -201,9 +228,9 @@ bool oled_init(void) {
         0x40,             /* SETSTARTLINE | 0 */
         0x8D, 0x14,       /* CHARGEPUMP: enable */
         0x20, 0x00,       /* MEMORYMODE: horizontal addressing */
-        0xA1,             /* SEGREMAP | 1: column 127 mapped to SEG0 */
-        0xC8,             /* COMSCANDEC: scan from COM[N-1] to COM0 */
-        0xDA, 0x12,       /* SETCOMPINS: alt config, no left/right remap */
+        OLED_SEGREMAP,    /* segment remap (orientation knob) */
+        OLED_COMSCAN,     /* COM scan direction (orientation knob) */
+        0xDA, OLED_COMPINS, /* SET COMPINS (panel-variant knob) */
         0x81, 0xCF,       /* SETCONTRAST: ~80% */
         0xD9, 0xF1,       /* SETPRECHARGE: high VCC */
         0xDB, 0x40,       /* SETVCOMDETECT */
@@ -300,8 +327,18 @@ void oled_flush(void) {
     int rc = i2c_write_timeout_us(OLED_I2C_INSTANCE, OLED_I2C_ADDR,
                                    &header, 1, true, 2000);
     if (rc < 1) return;
+    /* Timeout 100 ms (was 30 ms).  A full framebuffer push of 1024 B at
+     * 400 kHz takes ~25 ms in the ideal case but breadboard jumpers add
+     * parasitic capacitance that triples the effective bit time, and
+     * any clock-stretch the panel itself does on internal RAM commits
+     * stacks on top.  The Phase 1 hardware test showed right-edge
+     * artifacts (last ~10 columns left as stale GDDRAM) consistent
+     * with the transmission being truncated by the 30 ms cap.  100 ms
+     * is comfortably above the worst case; the cost of a generous
+     * timeout when nothing's wrong is zero (we return as soon as the
+     * bytes are clocked out). */
     i2c_write_timeout_us(OLED_I2C_INSTANCE, OLED_I2C_ADDR,
-                          fb, sizeof(fb), false, 30000);
+                          fb, sizeof(fb), false, 100000);
 }
 
 void oled_set_contrast(uint8_t level) {
