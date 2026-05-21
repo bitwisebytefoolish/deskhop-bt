@@ -41,6 +41,11 @@ set(VERSION_MAJOR 1)
 set(VERSION_MINOR 2)
 set(VERSION_PATCH 0)
 
+## Build date for the OLED About screen (ISO yyyy-mm-dd).  Captured at
+## configure time; a release always reconfigures (CMakeLists changes with
+## the version bump), so it reflects the build day.
+string(TIMESTAMP BUILD_DATE "%Y-%m-%d")
+
 ## Release Type Selection
 option(DH_DEBUG "Build a debug version" OFF)
 option(DH_DEBUG_CDC_FLASH "Enable CDC command to trigger bootloader mode" OFF)
@@ -254,6 +259,7 @@ target_compile_definitions(${binary}
     VERSION_MAJOR=${VERSION_MAJOR}
     VERSION_MINOR=${VERSION_MINOR}
     VERSION_PATCH=${VERSION_PATCH}
+    BUILD_DATE="${BUILD_DATE}"
     PIO_USB_USE_TINYUSB=${PIO_USE_TINYUSB}
     PIO_USB_DP_PIN_DEFAULT=${DP_PIN_DEFAULT}
     # We use cyw43_arch only for the LED and Bluetooth — not Wi-Fi.
