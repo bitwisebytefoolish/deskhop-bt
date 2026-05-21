@@ -31,6 +31,16 @@
  * text follows" marker.  See the font table in oled.c. */
 #define OLED_CH_ELLIPSIS '\x7f'
 
+/* Custom UI glyphs for button hints (font slots 0x80..0x82).  Both a
+ * char form (for buffers) and a string form (for concatenating into
+ * literals — avoids the \x escape eating a following hex digit). */
+#define OLED_CH_ARROW_UP   '\x80'
+#define OLED_CH_ARROW_DOWN '\x81'
+#define OLED_CH_SEL        '\x82'   /* circle = SELECT button */
+#define OLED_S_ARROW_UP    "\x80"
+#define OLED_S_ARROW_DOWN  "\x81"
+#define OLED_S_SEL         "\x82"
+
 /* Initialise I2C, probe for the panel, send the boot command sequence.
  * Returns false if the panel doesn't ACK on the configured address —
  * callers should treat that as "no OLED wired up" and skip further
