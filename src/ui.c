@@ -195,11 +195,12 @@ static void render_status(uint8_t active_output) {
              active_count, bonded_count);
     oled_text_at(28, 8, 1, counter);
 
-    /* ── Divider at y=14 ────────────────────────────────────────────
-     * 1-pixel rule between the header band and the body.  The scale-2
-     * letter above doesn't light any pixels in y=14-15 (the source
-     * font row 7 is blank), so the rule has clean breathing room. */
-    for (int x = 0; x < OLED_W; x++) oled_set_pixel(x, 14, true);
+    /* ── Divider at y=17 ────────────────────────────────────────────
+     * 1-pixel rule between the header band and the body.  The header
+     * text occupies rows 0-1 (y=0..15); the divider sits at y=17 to
+     * leave a ~2px breathing gap below the "N of M bonded" line rather
+     * than cutting through its descenders (which it did at y=14). */
+    for (int x = 0; x < OLED_W; x++) oled_set_pixel(x, 17, true);
 
     /* ── Body: all 4 hids_client slots, one per 8-pixel row ─────────
      * Always render the full 4 — connected slots show an icon + name
@@ -208,7 +209,7 @@ static void render_status(uint8_t active_output) {
      * many devices are connected; the user sees the slot capacity
      * directly instead of having to infer it. */
     for (int i = 0; i < BT_ACTIVE_CAP; i++) {
-        int y = 16 + i * 8;
+        int y = 20 + i * 8;   /* base shifted from 16 → 20 for the new divider gap */
         if (active[i].in_use) {
             /* Device-type icon — for now, generic "device" glyph.
              * Phase 3 work will populate a kind field on connect
