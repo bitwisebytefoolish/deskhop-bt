@@ -33,6 +33,18 @@
 #include "bt_hid_host_le.h"   /* BLE peer of bt_hid_host — see #29 */
 #endif
 
+#ifdef DH_BT_HID_HOST_KBD
+/* Shim wiring the BLE gamepad path (#24) to send_gamepad().  Kept here
+ * (deskhop side) because bt_hid_host_le.c can't include gamepad.h /
+ * TinyUSB types without colliding with BTstack's HID enums.  The raw
+ * buffer is the packed gamepad_report_t byte layout. */
+static void bt_gamepad_report_shim(uint8_t *raw, int len) {
+    if (len < (int)sizeof(gamepad_report_t))
+        return;
+    send_gamepad((gamepad_report_t *)raw, &global_state);
+}
+#endif
+
 /* ================================================== *
  * Perform initial UART setup
  * ================================================== */
@@ -371,6 +383,7 @@ void initial_setup(device_t *state) {
     bt_hid_state.parse_descriptor     = parse_report_descriptor;
     bt_hid_state.process_report       = process_keyboard_report;
     bt_hid_state.process_mouse_report = process_mouse_report;
+    bt_hid_state.process_gamepad_report = bt_gamepad_report_shim;
     bt_hid_state.blinks_left          = &state->blinks_left;
     bt_hid_state.last_led_change      = &state->last_led_change;
     bt_hid_state.onboard_led_state    = &state->onboard_led_state;

@@ -62,6 +62,13 @@ typedef struct {
     void (*process_mouse_report)(uint8_t *raw, int len, uint8_t itf,
                                  struct hid_interface_t *iface);
 
+    /* Route a packed 7-byte gamepad report (gamepad_report_t layout:
+     * int8 lx,ly,rx,ry; uint8 hat; uint16 buttons) onward.  Wired in
+     * setup.c to a shim that calls send_gamepad().  Kept free of
+     * TinyUSB types so this header doesn't collide with BTstack's.
+     * BLE Switch 2 Pro path (#24). */
+    void (*process_gamepad_report)(uint8_t *raw, int len);
+
     /* ---- LED feedback plumbing -------------------------------------- *
      * The BT stage indicator (bt_hid_host_stage_tick) drives the on-board
      * LED *directly* via these pointers — bypassing the blink_n /

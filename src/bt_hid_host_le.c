@@ -410,6 +410,31 @@ typedef struct {
 static le_active_entry_t le_active[MAX_NR_HIDS_CLIENTS];
 static int               le_num_active;
 
+/* ---- Switch 2 Pro gamepad (#24) -----------------------------------
+ * The Switch 2 Pro Controller is BLE with a PROPRIETARY GATT service
+ * (not HID-over-GATT): it advertises with Nintendo's company ID 0x057E
+ * and pushes input via notifications on a vendor characteristic.  So
+ * it bypasses the hids_client path entirely and uses a raw gatt_client
+ * notification subscription instead.  Reference: the switch2bridge
+ * project + #24. */
+#define TLV_TAG_GPAD ((((uint32_t)'G')<<24)|(((uint32_t)'P')<<16)|(((uint32_t)'A')<<8)|'D')
+#define NINTENDO_COMPANY_ID 0x057E
+
+/* Input report characteristic, 128-bit UUID 7492866c-ec3e-4619-8258-
+ * 32755ffcc0f9, big-endian (most-significant byte first). */
+static const uint8_t le_gp_input_uuid128[16] = {
+    0x74,0x92,0x86,0x6c, 0xec,0x3e, 0x46,0x19,
+    0x82,0x58, 0x32,0x75,0x5f,0xfc,0xc0,0xf9};
+
+static bool                         le_remote_is_gamepad = false;
+static gatt_client_characteristic_t le_gp_char;
+static gatt_client_notification_t   le_gp_notification;
+static bool                         le_gp_have_char  = false;
+static bool                         le_gp_subscribing = false;
+static bool                         le_gp_paired_retry = false;
+static bd_addr_t                    le_gp_bonded_addr = {0};
+static bool                         le_gp_bonded_valid = false;
+
 static bool le_addr_is_active(const bd_addr_t addr) {
     for (int i = 0; i < le_num_active; i++) {
         if (memcmp(le_active[i].addr, addr, sizeof(bd_addr_t)) == 0)
@@ -486,6 +511,13 @@ static void le_connection_timeout_cb(btstack_timer_source_t *ts);
 static void le_reconnect_timeout_cb(btstack_timer_source_t *ts);
 static void le_handle_outgoing_connection_error(void);
 static void le_kick_hids_client(void);
+static void le_kick_gamepad_gatt(void);
+static void le_gp_subscribe(void);
+static void le_gamepad_after_security(void);
+static void le_gamepad_gatt_handler(uint8_t packet_type, uint16_t channel,
+                                    uint8_t *packet, uint16_t size);
+static void le_gamepad_notify_handler(uint8_t packet_type, uint16_t channel,
+                                      uint8_t *packet, uint16_t size);
 
 static void le_packet_handler(uint8_t packet_type, uint16_t channel,
                               uint8_t *packet, uint16_t size);
@@ -534,6 +566,20 @@ static void le_start_connect(void) {
      * "favourite-device" hint, even though we no longer drive a
      * fast-reconnect from it).  Keep the store path; drop the load path. */
     btstack_tlv_get_instance(&le_tlv_impl, &le_tlv_ctx);
+
+    /* Load the persisted gamepad identity address (#24) so a bonded
+     * controller reconnecting via directed/identity adv (no manufacturer
+     * data) is still recognized as a gamepad. */
+    if (le_tlv_impl) {
+        bd_addr_t gp;
+        int n = le_tlv_impl->get_tag(le_tlv_ctx, TLV_TAG_GPAD, (uint8_t *)gp, sizeof(gp));
+        if (n == (int)sizeof(gp)) {
+            bd_addr_copy(le_gp_bonded_addr, gp);
+            le_gp_bonded_valid = true;
+            printf("[ble][gp] persisted gamepad %02x:%02x:%02x:%02x:%02x:%02x\n",
+                   gp[0], gp[1], gp[2], gp[3], gp[4], gp[5]);
+        }
+    }
 
 #ifdef DH_OLED_UI
     /* Load persisted device names now that the TLV is available, seeding
@@ -618,6 +664,211 @@ static void le_kick_hids_client(void) {
     }
     printf("[ble] hids_client_connect started (cid=0x%04x, report-mode)\n",
            le_hids_cid);
+}
+
+/* ---- Switch 2 Pro gamepad GATT path (#24) -------------------------- */
+
+static inline int8_t le_gp_clamp8(int v) {
+    if (v > 127)  return 127;
+    if (v < -128) return -128;
+    return (int8_t)v;
+}
+
+static bool le_adv_is_nintendo_gamepad(const uint8_t *packet) {
+    const uint8_t *ad  = gap_event_advertising_report_get_data(packet);
+    uint8_t        len = gap_event_advertising_report_get_data_length(packet);
+    int i = 0;
+    while (i + 1 < len) {
+        uint8_t l = ad[i];
+        if (l == 0) break;
+        if (i + 1 + l > len) break;
+        uint8_t type = ad[i + 1];
+        if (type == 0xFF && l >= 3) {   /* Manufacturer Specific Data */
+            uint16_t company = (uint16_t)ad[i + 2] | ((uint16_t)ad[i + 3] << 8);
+            if (company == NINTENDO_COMPANY_ID) return true;
+        }
+        i += 1 + l;
+    }
+    return false;
+}
+
+static bool le_addr_is_bonded_gamepad(const bd_addr_t addr) {
+    return le_gp_bonded_valid && memcmp(addr, le_gp_bonded_addr, 6) == 0;
+}
+
+/* Begin the gamepad bring-up: discover the vendor input characteristic
+ * by its 128-bit UUID across the whole handle range (we don't know the
+ * service UUID, so search by characteristic). */
+static void le_kick_gamepad_gatt(void) {
+    le_gp_have_char    = false;
+    le_gp_subscribing  = false;
+    le_gp_paired_retry = false;
+    uint8_t st = gatt_client_discover_characteristics_for_handle_range_by_uuid128(
+        &le_gamepad_gatt_handler, le_connection_handle, 0x0001, 0xffff,
+        le_gp_input_uuid128);
+    printf("[ble][gp] discover input characteristic: status=0x%02x\n", st);
+    if (st != ERROR_CODE_SUCCESS)
+        gap_disconnect(le_connection_handle);
+}
+
+/* Register a notification listener and enable notifications (CCCD).
+ * If the CCCD write is rejected for insufficient encryption, the query-
+ * complete handler triggers pairing and we retry from
+ * le_gamepad_after_security(). */
+static void le_gp_subscribe(void) {
+    le_gp_subscribing = true;
+    gatt_client_listen_for_characteristic_value_updates(
+        &le_gp_notification, &le_gamepad_notify_handler,
+        le_connection_handle, &le_gp_char);
+    uint8_t st = gatt_client_write_client_characteristic_configuration(
+        &le_gamepad_gatt_handler, le_connection_handle, &le_gp_char,
+        GATT_CLIENT_CHARACTERISTICS_CONFIGURATION_NOTIFICATION);
+    printf("[ble][gp] enable notifications: write status=0x%02x\n", st);
+}
+
+/* Re-issue the CCCD write after we paired in response to an
+ * insufficient-encryption rejection. */
+static void le_gamepad_after_security(void) {
+    if (!le_gp_have_char) { le_kick_gamepad_gatt(); return; }
+    le_gp_subscribe();
+}
+
+/* Notifications are flowing — register the device as active, mark
+ * connected, and persist its identity address for reconnect detection. */
+static void le_gamepad_on_ready(void) {
+    le_add_active(le_remote.addr, 0xFFFF /* no hids_cid */, le_connection_handle);
+    le_state = LE_READY;
+    if (g_bt && g_bt->keyboard_connected)
+        *g_bt->keyboard_connected = true;
+
+    bd_addr_copy(le_gp_bonded_addr, le_remote.addr);
+    le_gp_bonded_valid = true;
+    if (le_tlv_impl)
+        le_tlv_impl->store_tag(le_tlv_ctx, TLV_TAG_GPAD,
+                               (const uint8_t *)le_gp_bonded_addr, 6);
+
+#ifdef DH_OLED_UI
+    {
+        bt_event_t e = {.type = BT_EVT_DEVICE_CONNECTED, .transport = BT_TRANSPORT_LE,
+                        .kind = BT_KIND_UNKNOWN, .cid = 0xFFFF, .ts_us = time_us_64()};
+        bt_evt_addr_from_bd(&e.addr, le_remote.addr);
+        strncpy(e.name, le_name_cache_get(le_remote.addr), BT_EVT_NAME_MAX - 1);
+        bt_events_publish(&e);
+        bt_events_set_bonded_count((uint8_t)le_device_db_count());
+    }
+#endif
+    printf("[ble][gp] Switch2 Pro ready — input notifications active\n");
+
+    /* Resume scanning for additional peripherals if slots remain. */
+    if (le_num_active < MAX_NR_HIDS_CLIENTS)
+        le_start_scan();
+    else
+        le_state = LE_READY;
+}
+
+static void le_gamepad_gatt_handler(uint8_t packet_type, uint16_t channel,
+                                    uint8_t *packet, uint16_t size) {
+    (void)channel; (void)size;
+    if (packet_type != HCI_EVENT_PACKET) return;
+
+    switch (hci_event_packet_get_type(packet)) {
+        case GATT_EVENT_CHARACTERISTIC_QUERY_RESULT:
+            gatt_event_characteristic_query_result_get_characteristic(packet, &le_gp_char);
+            le_gp_have_char = true;
+            printf("[ble][gp] found input char value_handle=0x%04x\n",
+                   le_gp_char.value_handle);
+            break;
+
+        case GATT_EVENT_QUERY_COMPLETE: {
+            uint8_t att = gatt_event_query_complete_get_att_status(packet);
+            if (!le_gp_subscribing) {
+                /* Discovery finished. */
+                if (!le_gp_have_char) {
+                    printf("[ble][gp] input characteristic not found (att=0x%02x) — disconnecting\n", att);
+                    gap_disconnect(le_connection_handle);
+                    break;
+                }
+                le_gp_subscribe();
+            } else {
+                /* CCCD write finished. */
+                if (att == ATT_ERROR_SUCCESS) {
+                    le_gamepad_on_ready();
+                } else if ((att == ATT_ERROR_INSUFFICIENT_ENCRYPTION ||
+                            att == ATT_ERROR_INSUFFICIENT_AUTHENTICATION) &&
+                           !le_gp_paired_retry) {
+                    printf("[ble][gp] CCCD needs encryption (att=0x%02x) — pairing then retrying\n", att);
+                    le_gp_paired_retry = true;
+                    le_gp_subscribing  = false;   /* will re-subscribe after security */
+                    sm_request_pairing(le_connection_handle);
+                } else {
+                    printf("[ble][gp] enable notifications failed att=0x%02x — disconnecting\n", att);
+                    gap_disconnect(le_connection_handle);
+                }
+            }
+            break;
+        }
+
+        default: break;
+    }
+}
+
+/* Parse a Switch 2 Pro input notification into the packed gamepad_report_t
+ * byte layout and forward it.  Field offsets are from the switch2bridge
+ * reverse-engineering: buttons in bytes 2-4, two 12-bit sticks in bytes
+ * 5-10. */
+static void le_gamepad_notify_handler(uint8_t packet_type, uint16_t channel,
+                                      uint8_t *packet, uint16_t size) {
+    (void)channel; (void)size;
+    if (packet_type != HCI_EVENT_PACKET) return;
+    if (hci_event_packet_get_type(packet) != GATT_EVENT_NOTIFICATION) return;
+
+    const uint8_t *d   = gatt_event_notification_get_value(packet);
+    uint16_t       len = gatt_event_notification_get_value_length(packet);
+    if (len < 11) return;
+
+    uint8_t  b2 = d[2], b3 = d[3], b4 = d[4];
+    uint16_t btn = 0;
+    if (b2 & 0x02) btn |= 1u << 0;   /* A  */
+    if (b2 & 0x01) btn |= 1u << 1;   /* B  */
+    if (b2 & 0x08) btn |= 1u << 2;   /* X  */
+    if (b2 & 0x04) btn |= 1u << 3;   /* Y  */
+    if (b3 & 0x10) btn |= 1u << 4;   /* L  */
+    if (b2 & 0x10) btn |= 1u << 5;   /* R  */
+    if (b3 & 0x20) btn |= 1u << 6;   /* ZL */
+    if (b2 & 0x20) btn |= 1u << 7;   /* ZR */
+    if (b2 & 0x40) btn |= 1u << 8;   /* +  */
+    if (b3 & 0x40) btn |= 1u << 9;   /* -  */
+    if (b3 & 0x80) btn |= 1u << 10;  /* LS */
+    if (b2 & 0x80) btn |= 1u << 11;  /* RS */
+    if (b4 & 0x01) btn |= 1u << 12;  /* Home    */
+    if (b4 & 0x10) btn |= 1u << 13;  /* Capture */
+    if (b4 & 0x08) btn |= 1u << 14;  /* GL */
+    if (b4 & 0x04) btn |= 1u << 15;  /* GR */
+
+    bool up = b3 & 0x08, down = b3 & 0x01, left = b3 & 0x04, right = b3 & 0x02;
+    uint8_t hat = 8;   /* centered */
+    if (up && !down)        hat = (right && !left) ? 1 : (left && !right) ? 7 : 0;
+    else if (down && !up)   hat = (right && !left) ? 3 : (left && !right) ? 5 : 4;
+    else                    hat = (right && !left) ? 2 : (left && !right) ? 6 : 8;
+
+    int lx = (int)(d[5] | ((d[6] & 0x0F) << 8)) - 2048;
+    int ly = (int)(((d[6] & 0xF0) >> 4) | (d[7] << 4)) - 2048;
+    int rx = (int)(d[8] | ((d[9] & 0x0F) << 8)) - 2048;
+    int ry = (int)(((d[9] & 0xF0) >> 4) | (d[10] << 4)) - 2048;
+
+    /* Packed gamepad_report_t byte layout: lx, ly, rx, ry, hat, btn_lo, btn_hi.
+     * Y axes inverted to the HID convention (up = negative). */
+    uint8_t rep[7];
+    rep[0] = (uint8_t)le_gp_clamp8(lx >> 4);
+    rep[1] = (uint8_t)le_gp_clamp8(-(ly >> 4));
+    rep[2] = (uint8_t)le_gp_clamp8(rx >> 4);
+    rep[3] = (uint8_t)le_gp_clamp8(-(ry >> 4));
+    rep[4] = hat;
+    rep[5] = (uint8_t)(btn & 0xFF);
+    rep[6] = (uint8_t)(btn >> 8);
+
+    if (g_bt && g_bt->process_gamepad_report)
+        g_bt->process_gamepad_report(rep, sizeof(rep));
 }
 
 /* ---- HID input report → deskhop's boot-keyboard / boot-mouse pipeline ----
@@ -1122,12 +1373,19 @@ static void le_sm_packet_handler(uint8_t packet_type, uint16_t channel,
     }
 
     if (security_up) {
-        /* Encrypted link is up.  Now kick off the HID service client
-         * — its GATT discovery is allowed to run on the now-encrypted
-         * link, and the 8BitDo (and similar BLE-only keyboards) will
-         * happily respond to characteristic + descriptor queries that
-         * would otherwise have been rejected. */
-        le_kick_hids_client();
+        if (le_remote_is_gamepad) {
+            /* Gamepad paired in response to an insufficient-encryption
+             * CCCD rejection — retry the subscribe now that the link is
+             * encrypted. */
+            le_gamepad_after_security();
+        } else {
+            /* Encrypted link is up.  Now kick off the HID service client
+             * — its GATT discovery is allowed to run on the now-encrypted
+             * link, and the 8BitDo (and similar BLE-only keyboards) will
+             * happily respond to characteristic + descriptor queries that
+             * would otherwise have been rejected. */
+            le_kick_hids_client();
+        }
     }
 }
 
@@ -1226,7 +1484,12 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
             bool is_directed  = (adv_event_type == 0x01);  /* ADV_DIRECT_IND */
             bool is_identity  = (adv_addr_type == BD_ADDR_TYPE_LE_PUBLIC_IDENTITY) ||
                                 (adv_addr_type == BD_ADDR_TYPE_LE_RANDOM_IDENTITY);
-            if (!is_directed && !is_identity && !le_adv_contains_hid_service(packet))
+            /* Switch 2 Pro (and other Nintendo controllers) advertise with
+             * the Nintendo company ID in manufacturer data instead of the
+             * HID service UUID — accept those too (#24). */
+            bool is_gamepad   = le_adv_is_nintendo_gamepad(packet);
+            if (!is_directed && !is_identity && !is_gamepad &&
+                !le_adv_contains_hid_service(packet))
                 break;
             bd_addr_t adv_addr;
             gap_event_advertising_report_get_address(packet, adv_addr);
@@ -1261,6 +1524,10 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
             gap_stop_scan();
             bd_addr_copy(le_remote.addr, adv_addr);
             le_remote.addr_type = gap_event_advertising_report_get_address_type(packet);
+            /* Remember whether this peer is a gamepad: either it advertised
+             * Nintendo manufacturer data, or it's our persisted bonded
+             * gamepad reconnecting via directed/identity adv (no mfr data). */
+            le_remote_is_gamepad = is_gamepad || le_addr_is_bonded_gamepad(adv_addr);
 #ifdef DH_OLED_UI
             /* Harvest the peer's friendly name from any AD records in
              * this packet.  Directed adv has no payload (is_directed
@@ -1307,9 +1574,19 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
              * peripheral initiates security itself or BTstack handles
              * it as part of the bond-resume flow. */
             le_state = LE_W4_ENCRYPTED;
-            printf("[ble] LE connection complete (handle 0x%04x) — waiting for security\n",
-                   le_connection_handle);
-            sm_request_pairing(le_connection_handle);
+            if (le_remote_is_gamepad) {
+                /* Gamepad: try the GATT subscribe WITHOUT bonding first;
+                 * only pair if the CCCD write is rejected for insufficient
+                 * encryption (handled in le_gamepad_gatt_handler).  Many
+                 * controllers expose the input characteristic unencrypted. */
+                printf("[ble][gp] LE connection complete (handle 0x%04x) — subscribing (no bond yet)\n",
+                       le_connection_handle);
+                le_kick_gamepad_gatt();
+            } else {
+                printf("[ble] LE connection complete (handle 0x%04x) — waiting for security\n",
+                       le_connection_handle);
+                sm_request_pairing(le_connection_handle);
+            }
             break;
 
         case HCI_EVENT_DISCONNECTION_COMPLETE: {
@@ -1330,6 +1607,11 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
             le_connection_handle = HCI_CON_HANDLE_INVALID;
             if (g_bt && g_bt->keyboard_connected)
                 *g_bt->keyboard_connected = false;
+            /* Reset per-connection gamepad bring-up state. */
+            le_remote_is_gamepad = false;
+            le_gp_have_char      = false;
+            le_gp_subscribing    = false;
+            le_gp_paired_retry   = false;
             switch (le_state) {
                 case LE_READY:
                     /* Reconnect to the same peer only if it's still
