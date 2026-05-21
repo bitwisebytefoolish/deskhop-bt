@@ -212,6 +212,48 @@ typedef struct {
 static le_device_addr_t le_remote;
 static hci_con_handle_t le_connection_handle = HCI_CON_HANDLE_INVALID;
 
+/* ---- Opt-in pairing gate (#22 Phase 3 fix) ---------------------------
+ * Pairing is CLOSED by default: we only accept a NEW (unbonded) device
+ * while the user has explicitly opened a pairing window via the LCD
+ * "Pair new" flow.  This is what makes "Forget" stick — without it, a
+ * forgotten device that's still powered on just silently re-pairs the
+ * instant it advertises.
+ *
+ * Bonded devices are unaffected: they reconnect (re-encrypt from the
+ * stored LTK) regardless of this flag.  The gate only blocks fresh
+ * pairings.
+ *
+ * Auto-closes after a hard timeout as a safety net in case the UI ever
+ * fails to close it explicitly. */
+static bool     le_pairing_open       = false;
+static uint64_t le_pairing_open_until = 0;
+#define LE_PAIRING_WINDOW_US (65ull * 1000000ull)  /* > UI's 60 s window */
+
+void bt_hid_host_le_set_pairing_open(bool open) {
+    le_pairing_open = open;
+    le_pairing_open_until = open ? (time_us_64() + LE_PAIRING_WINDOW_US) : 0;
+    printf("[ble] pairing window %s\n", open ? "OPEN" : "closed");
+}
+
+/* True if `addr` is already in our bond DB, i.e. a reconnect rather than
+ * a new pairing.  Resolved-identity address types are inherently bonded
+ * (the controller only resolves RPAs for peers whose IRK we hold). */
+static bool le_addr_is_bonded(const uint8_t *addr, uint8_t addr_type) {
+    if (addr_type == BD_ADDR_TYPE_LE_PUBLIC_IDENTITY ||
+        addr_type == BD_ADDR_TYPE_LE_RANDOM_IDENTITY)
+        return true;
+    int maxn = le_device_db_max_count();
+    for (int i = 0; i < maxn; i++) {
+        int       t = (int)BD_ADDR_TYPE_UNKNOWN;
+        bd_addr_t db;
+        sm_key_t  irk;
+        le_device_db_info(i, &t, db, irk);
+        if (t == (int)BD_ADDR_TYPE_UNKNOWN) continue;
+        if (memcmp(db, addr, 6) == 0) return true;
+    }
+    return false;
+}
+
 /* hids_client state.  cid is the per-connection HID client ID; descriptor
  * storage holds the parsed REPORT_MAP from each connected peripheral —
  * **shared across all hids_clients** (see hids_client_descriptor_storage_
@@ -341,8 +383,9 @@ static void le_bnam_clear(void) {
  * Sized 1:1 with the hids_client pool — no point tracking more than
  * we can host simultaneously.                                       */
 typedef struct {
-    bd_addr_t addr;
-    uint16_t  hids_cid;
+    bd_addr_t       addr;
+    uint16_t        hids_cid;
+    hci_con_handle_t con_handle;   /* for gap_disconnect on forget */
 } le_active_entry_t;
 static le_active_entry_t le_active[MAX_NR_HIDS_CLIENTS];
 static int               le_num_active;
@@ -355,7 +398,7 @@ static bool le_addr_is_active(const bd_addr_t addr) {
     return false;
 }
 
-static void le_add_active(const bd_addr_t addr, uint16_t cid) {
+static void le_add_active(const bd_addr_t addr, uint16_t cid, hci_con_handle_t handle) {
     if (le_num_active >= MAX_NR_HIDS_CLIENTS) {
         printf("[ble] active-device table full (%d slots) — refusing to add %02x:%02x:%02x:%02x:%02x:%02x\n",
                MAX_NR_HIDS_CLIENTS,
@@ -363,7 +406,8 @@ static void le_add_active(const bd_addr_t addr, uint16_t cid) {
         return;
     }
     bd_addr_copy(le_active[le_num_active].addr, addr);
-    le_active[le_num_active].hids_cid = cid;
+    le_active[le_num_active].hids_cid   = cid;
+    le_active[le_num_active].con_handle = handle;
     le_num_active++;
     printf("[ble] active devices: %d/%d (added cid=0x%04x)\n",
            le_num_active, MAX_NR_HIDS_CLIENTS, cid);
@@ -686,7 +730,7 @@ static void le_hids_client_event_handler(uint8_t packet_type, uint16_t channel,
             /* Track this device in the active list so subsequent scans
              * don't try to reconnect to it (which would tear down this
              * very connection). */
-            le_add_active(le_remote.addr, connected_cid);
+            le_add_active(le_remote.addr, connected_cid, le_connection_handle);
 #ifdef DH_OLED_UI
             /* Tell the UI the connection is up.  Attach the cached
              * friendly name (from undirected adv earlier this session)
@@ -801,6 +845,18 @@ static void le_sm_packet_handler(uint8_t packet_type, uint16_t channel,
 
     switch (hci_event_packet_get_type(packet)) {
         case SM_EVENT_JUST_WORKS_REQUEST:
+            /* Opt-in pairing safety net.  A just-works request only
+             * arrives for a NEW pairing (bonded reconnects re-encrypt
+             * silently).  If the pairing window isn't open, decline —
+             * this stops a forgotten-but-still-advertising device from
+             * silently re-pairing.  The pre-connect adv filter should
+             * already have skipped it, but declining here is the
+             * authoritative gate. */
+            if (!le_pairing_open) {
+                printf("[ble] just-works request but pairing CLOSED — declining\n");
+                sm_bonding_decline(sm_event_just_works_request_get_handle(packet));
+                break;
+            }
             printf("[ble] SSP just-works request — auto-confirm\n");
             sm_just_works_confirm(sm_event_just_works_request_get_handle(packet));
             break;
@@ -1020,6 +1076,20 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
              * 1st two). */
             if (le_addr_is_active(adv_addr))
                 break;
+            /* Opt-in pairing gate: only connect to an UNBONDED device
+             * when a pairing window is open (the user picked "Pair new"
+             * on the LCD).  Bonded devices reconnect regardless.  This
+             * is what makes "Forget" stick — a forgotten device that's
+             * still advertising won't silently re-pair. */
+            if (!le_pairing_open &&
+                !le_addr_is_bonded(adv_addr,
+                                   gap_event_advertising_report_get_address_type(packet))) {
+                break;  /* unknown device, pairing closed → ignore */
+            }
+            /* Auto-close the pairing window if its safety timeout lapsed
+             * (UI normally closes it explicitly; this is belt-and-braces). */
+            if (le_pairing_open && time_us_64() > le_pairing_open_until)
+                le_pairing_open = false;
             /* All hids_client slots in use?  Skip — no point connecting
              * if we can't host the HID service client. */
             if (le_num_active >= MAX_NR_HIDS_CLIENTS) {
@@ -1094,7 +1164,16 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
                 *g_bt->keyboard_connected = false;
             switch (le_state) {
                 case LE_READY:
-                    le_state = LE_W4_TIMEOUT_THEN_RECONNECT;
+                    /* Reconnect to the same peer only if it's still
+                     * bonded.  If we just forgot it (bond removed), a
+                     * direct reconnect would connect → JUST_WORKS →
+                     * decline (pairing closed) → disconnect → loop.
+                     * Falling through to SCAN avoids that: the scan
+                     * filter skips the now-unbonded device. */
+                    if (le_addr_is_bonded(le_remote.addr, le_remote.addr_type))
+                        le_state = LE_W4_TIMEOUT_THEN_RECONNECT;
+                    else
+                        le_state = LE_W4_TIMEOUT_THEN_SCAN;
                     break;
                 default:
                     le_state = LE_W4_TIMEOUT_THEN_SCAN;
@@ -1139,13 +1218,19 @@ static int le_db_remove_by_addr(const uint8_t *addr) {
 }
 
 void bt_hid_host_le_forget(const uint8_t *addr) {
-    /* Tear down a live connection to this device, if any.  Disconnecting
-     * via the HID client cid drives our normal SERVICE_DISCONNECTED path,
-     * which removes it from the active table, publishes the UI event, and
-     * resumes scanning. */
+    /* Tear down a live connection to this device, if any.  Crucially we
+     * drop the ACL LINK (gap_disconnect), not just the HID client —
+     * hids_client_disconnect leaves the encrypted ACL up, and the device
+     * would re-attach over it with no re-pairing, so "forget" wouldn't
+     * stick.  gap_disconnect forces a full disconnect; with the bond
+     * removed and the pairing window closed, the device can't come back
+     * until the user runs "Pair new".  The HID-service-disconnected
+     * event from the ACL drop cleans up the active table + UI. */
     for (int i = 0; i < le_num_active; i++) {
         if (memcmp(le_active[i].addr, addr, 6) == 0) {
             hids_client_disconnect(le_active[i].hids_cid);
+            if (le_active[i].con_handle != HCI_CON_HANDLE_INVALID)
+                gap_disconnect(le_active[i].con_handle);
             break;
         }
     }
@@ -1172,9 +1257,13 @@ void bt_hid_host_le_forget(const uint8_t *addr) {
 }
 
 void bt_hid_host_le_forget_all(void) {
-    /* Disconnect everything that's live. */
-    for (int i = 0; i < le_num_active; i++)
+    /* Disconnect everything that's live — ACL drop, not just HID client
+     * (see the rationale in bt_hid_host_le_forget). */
+    for (int i = 0; i < le_num_active; i++) {
         hids_client_disconnect(le_active[i].hids_cid);
+        if (le_active[i].con_handle != HCI_CON_HANDLE_INVALID)
+            gap_disconnect(le_active[i].con_handle);
+    }
 
     int maxn = le_device_db_max_count();
     int removed = 0;
@@ -1198,6 +1287,44 @@ void bt_hid_host_le_forget_all(void) {
 
     printf("[ble] forget ALL — removed %d bond(s), DB now %d\n",
            removed, le_device_db_count());
+}
+
+int bt_hid_host_le_get_bonds(bt_bond_info_t *out, int max) {
+    int count = 0;
+    int maxn = le_device_db_max_count();
+    for (int i = 0; i < maxn && count < max; i++) {
+        int        type = (int)BD_ADDR_TYPE_UNKNOWN;
+        bd_addr_t  db_addr;
+        sm_key_t   irk;
+        le_device_db_info(i, &type, db_addr, irk);
+        if (type == (int)BD_ADDR_TYPE_UNKNOWN) continue;  /* empty slot */
+
+        memcpy(out[count].addr, db_addr, 6);
+        out[count].addr_type = (uint8_t)type;
+        out[count].name[0]   = '\0';
+#ifdef DH_OLED_UI
+        /* Persisted friendly name (cache is seeded from the TLV name
+         * table at boot, so this resolves for any bonded device). */
+        const char *nm = le_name_cache_get(db_addr);
+        if (nm[0]) {
+            strncpy(out[count].name, nm, sizeof(out[count].name) - 1);
+            out[count].name[sizeof(out[count].name) - 1] = '\0';
+        }
+#endif
+        /* Connection status: is this identity address in the active
+         * (connected) table?  For the static-random / public-identity
+         * peripherals this targets, the connect address equals the
+         * identity, so a direct compare works. */
+        out[count].connected = false;
+        for (int j = 0; j < le_num_active; j++) {
+            if (memcmp(le_active[j].addr, db_addr, 6) == 0) {
+                out[count].connected = true;
+                break;
+            }
+        }
+        count++;
+    }
+    return count;
 }
 
 /* ---- public init ------------------------------------------------- */

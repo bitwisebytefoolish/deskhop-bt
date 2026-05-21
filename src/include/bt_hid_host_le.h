@@ -44,4 +44,25 @@ void bt_hid_host_le_forget(const uint8_t *addr);
  * table.  The bulletproof "factory reset bonds" path. */
 void bt_hid_host_le_forget_all(void);
 
+/* Open / close the pairing window (#22 Phase 3 fix).  Pairing is CLOSED
+ * by default — the host ignores unbonded advertisers and declines their
+ * pairing requests, so a forgotten device can't silently re-pair.  The
+ * LCD "Pair new" flow opens the window for its countdown and closes it
+ * on success / cancel / timeout.  Bonded devices reconnect regardless. */
+void bt_hid_host_le_set_pairing_open(bool open);
+
+/* A bonded-device record for the LCD device list.  Lets the UI show every
+ * bond (connected or not) with a connection-status indicator. */
+typedef struct {
+    uint8_t addr[6];
+    uint8_t addr_type;
+    char    name[24];   /* "" if no friendly name known; matches BT_EVT_NAME_MAX */
+    bool    connected;  /* currently has a live HID connection */
+} bt_bond_info_t;
+
+/* Enumerate bonded BLE devices into `out` (capacity `max`).  Returns the
+ * number filled.  Each entry carries the identity address, the persisted
+ * friendly name (if any), and whether the device is currently connected. */
+int bt_hid_host_le_get_bonds(bt_bond_info_t *out, int max);
+
 #endif /* DH_BT_HID_HOST_KBD */
