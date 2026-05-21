@@ -153,7 +153,10 @@ static void marquee(char *out, size_t outsz, const char *name, int win, uint64_t
     if (n > (int)sizeof(buf) - 1) n = (int)sizeof(buf) - 1;
     memcpy(buf, name + off, (size_t)n);
     buf[n] = '\0';
-    if (ellipsis && win >= 3) { buf[win - 1] = '.'; buf[win - 2] = '.'; buf[win - 3] = '.'; }
+    /* Compact overflow hint: a single-cell "…" in the last column (the
+     * font renders OLED_CH_ELLIPSIS as three baseline dots in one glyph
+     * width) rather than three '.' characters eating three cells. */
+    if (ellipsis && win >= 1) buf[win - 1] = OLED_CH_ELLIPSIS;
     snprintf(out, outsz, "%s", buf);
 }
 

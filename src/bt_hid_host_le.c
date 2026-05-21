@@ -404,7 +404,8 @@ static void le_bnam_clear(void) {
 typedef struct {
     bd_addr_t       addr;
     uint16_t        hids_cid;
-    hci_con_handle_t con_handle;   /* for gap_disconnect on forget */
+    hci_con_handle_t con_handle;        /* for gap_disconnect on forget */
+    uint16_t        name_value_handle;  /* GAP Device Name char handle, 0=unknown/done */
 } le_active_entry_t;
 static le_active_entry_t le_active[MAX_NR_HIDS_CLIENTS];
 static int               le_num_active;
@@ -425,8 +426,9 @@ static void le_add_active(const bd_addr_t addr, uint16_t cid, hci_con_handle_t h
         return;
     }
     bd_addr_copy(le_active[le_num_active].addr, addr);
-    le_active[le_num_active].hids_cid   = cid;
-    le_active[le_num_active].con_handle = handle;
+    le_active[le_num_active].hids_cid          = cid;
+    le_active[le_num_active].con_handle        = handle;
+    le_active[le_num_active].name_value_handle = 0;
     le_num_active++;
     printf("[ble] active devices: %d/%d (added cid=0x%04x)\n",
            le_num_active, MAX_NR_HIDS_CLIENTS, cid);
@@ -442,6 +444,35 @@ static void le_remove_active_by_cid(uint16_t cid) {
         le_num_active--;
         printf("[ble] active devices: %d/%d (removed cid=0x%04x)\n",
                le_num_active, MAX_NR_HIDS_CLIENTS, cid);
+        return;
+    }
+}
+
+/* Drop an active entry by ACL connection handle, publishing a
+ * DISCONNECTED event to the UI on the way out.  Called from
+ * HCI_EVENT_DISCONNECTION_COMPLETE so a forget that yanks the ACL out
+ * from under hids_client still clears the active table + status screen
+ * even when no HID_SERVICE_DISCONNECTED subevent arrives.  No-op (and no
+ * duplicate event) if the slot was already freed by that subevent. */
+static void le_remove_active_by_handle(hci_con_handle_t handle) {
+    for (int i = 0; i < le_num_active; i++) {
+        if (le_active[i].con_handle != handle)
+            continue;
+#ifdef DH_OLED_UI
+        bt_event_t e = {
+            .type      = BT_EVT_DEVICE_DISCONNECTED,
+            .transport = BT_TRANSPORT_LE,
+            .cid       = le_active[i].hids_cid,
+            .ts_us     = time_us_64(),
+        };
+        bt_evt_addr_from_bd(&e.addr, le_active[i].addr);
+        bt_events_publish(&e);
+#endif
+        if (i != le_num_active - 1)
+            le_active[i] = le_active[le_num_active - 1];
+        le_num_active--;
+        printf("[ble] active devices: %d/%d (removed handle=0x%04x on ACL drop)\n",
+               le_num_active, MAX_NR_HIDS_CLIENTS, handle);
         return;
     }
 }
@@ -723,39 +754,78 @@ static void le_handle_input_report(uint16_t hids_cid, uint8_t service_index,
  * issued when the name cache has nothing for the device, so it costs a
  * single extra read per never-before-named device and nothing on
  * reconnect (the persisted name is already cached). */
+static int le_active_idx_for_handle(hci_con_handle_t h) {
+    for (int i = 0; i < le_num_active; i++)
+        if (le_active[i].con_handle == h) return i;
+    return -1;
+}
+
 static void le_gap_name_handler(uint8_t packet_type, uint16_t channel,
                                 uint8_t *packet, uint16_t size) {
     (void)channel; (void)size;
     if (packet_type != HCI_EVENT_PACKET) return;
-    if (hci_event_packet_get_type(packet) != GATT_EVENT_CHARACTERISTIC_VALUE_QUERY_RESULT)
-        return;
 
-    hci_con_handle_t h   = gatt_event_characteristic_value_query_result_get_handle(packet);
-    const uint8_t   *val = gatt_event_characteristic_value_query_result_get_value(packet);
-    uint16_t         len = gatt_event_characteristic_value_query_result_get_value_length(packet);
-    if (len == 0) return;
-    if (len >= BT_EVT_NAME_MAX) len = BT_EVT_NAME_MAX - 1;
+    switch (hci_event_packet_get_type(packet)) {
+        /* Step 1: discovery turned up the GAP Device Name characteristic.
+         * Stash its value handle on the matching active entry; we issue
+         * the read once discovery completes (below). */
+        case GATT_EVENT_CHARACTERISTIC_QUERY_RESULT: {
+            hci_con_handle_t h = gatt_event_characteristic_query_result_get_handle(packet);
+            int idx = le_active_idx_for_handle(h);
+            if (idx < 0) break;
+            gatt_client_characteristic_t ch;
+            gatt_event_characteristic_query_result_get_characteristic(packet, &ch);
+            le_active[idx].name_value_handle = ch.value_handle;
+            break;
+        }
 
-    char name[BT_EVT_NAME_MAX];
-    memcpy(name, val, len);
-    name[len] = '\0';
+        /* Step 2: discovery finished.  If we found the characteristic,
+         * read its full value by handle (a plain Read Request returns up
+         * to ATT_MTU-1 bytes — no Read-By-Type 19-byte cap).  Clear the
+         * stashed handle first so this read's own QUERY_COMPLETE doesn't
+         * re-issue the read. */
+        case GATT_EVENT_QUERY_COMPLETE: {
+            hci_con_handle_t h = gatt_event_query_complete_get_handle(packet);
+            int idx = le_active_idx_for_handle(h);
+            if (idx < 0) break;
+            uint16_t vh = le_active[idx].name_value_handle;
+            if (vh == 0) break;
+            le_active[idx].name_value_handle = 0;
+            gatt_client_read_value_of_characteristic_using_value_handle(
+                &le_gap_name_handler, h, vh);
+            break;
+        }
 
-    /* Map the connection handle back to the device address. */
-    for (int i = 0; i < le_num_active; i++) {
-        if (le_active[i].con_handle != h) continue;
-        le_name_cache_put(le_active[i].addr, name);
-        le_bnam_put(le_active[i].addr, name);   /* persist for next boot */
-        bt_event_t e = {
-            .type      = BT_EVT_DEVICE_NAME_RESOLVED,
-            .transport = BT_TRANSPORT_LE,
-            .ts_us     = time_us_64(),
-        };
-        bt_evt_addr_from_bd(&e.addr, le_active[i].addr);
-        strncpy(e.name, name, BT_EVT_NAME_MAX - 1);
-        e.name[BT_EVT_NAME_MAX - 1] = '\0';
-        bt_events_publish(&e);
-        printf("[ble] GAP device name resolved: \"%s\"\n", name);
-        break;
+        /* Step 3: the name value came back. */
+        case GATT_EVENT_CHARACTERISTIC_VALUE_QUERY_RESULT: {
+            hci_con_handle_t h   = gatt_event_characteristic_value_query_result_get_handle(packet);
+            const uint8_t   *val = gatt_event_characteristic_value_query_result_get_value(packet);
+            uint16_t         len = gatt_event_characteristic_value_query_result_get_value_length(packet);
+            if (len == 0) break;
+            if (len >= BT_EVT_NAME_MAX) len = BT_EVT_NAME_MAX - 1;
+
+            char name[BT_EVT_NAME_MAX];
+            memcpy(name, val, len);
+            name[len] = '\0';
+
+            int idx = le_active_idx_for_handle(h);
+            if (idx < 0) break;
+            le_name_cache_put(le_active[idx].addr, name);
+            le_bnam_put(le_active[idx].addr, name);   /* persist for next boot */
+            bt_event_t e = {
+                .type      = BT_EVT_DEVICE_NAME_RESOLVED,
+                .transport = BT_TRANSPORT_LE,
+                .ts_us     = time_us_64(),
+            };
+            bt_evt_addr_from_bd(&e.addr, le_active[idx].addr);
+            strncpy(e.name, name, BT_EVT_NAME_MAX - 1);
+            e.name[BT_EVT_NAME_MAX - 1] = '\0';
+            bt_events_publish(&e);
+            printf("[ble] GAP device name resolved: \"%s\"\n", name);
+            break;
+        }
+
+        default: break;
     }
 }
 #endif /* DH_OLED_UI */
@@ -843,7 +913,14 @@ static void le_hids_client_event_handler(uint8_t packet_type, uint16_t channel,
                  * the cache + persists it + fires NAME_RESOLVED so the
                  * UI updates. */
                 if (le_name_cache_get(le_remote.addr)[0] == '\0') {
-                    gatt_client_read_value_of_characteristics_by_uuid16(
+                    /* Discover the GAP Device Name characteristic to get
+                     * its value handle, then read the full value by
+                     * handle (see le_gap_name_handler).  A read-by-UUID
+                     * (Read-By-Type) caps the returned value at ATT_MTU-4
+                     * = 19 bytes on the common 23-byte MTU, which clipped
+                     * "8BitDo Retro Keyboard" to "...Keyboa".  A plain
+                     * Read Request by handle returns up to ATT_MTU-1. */
+                    gatt_client_discover_characteristics_for_handle_range_by_uuid16(
                         &le_gap_name_handler, le_connection_handle,
                         0x0001, 0xffff,
                         ORG_BLUETOOTH_CHARACTERISTIC_GAP_DEVICE_NAME);
@@ -1236,9 +1313,16 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
             break;
 
         case HCI_EVENT_DISCONNECTION_COMPLETE: {
+            hci_con_handle_t h = hci_event_disconnection_complete_get_connection_handle(packet);
+            /* Clear the active table + UI for whichever device dropped,
+             * independent of the reconnect bookkeeping below.  This is
+             * what makes a forget-while-connected actually vanish from
+             * the status screen: gap_disconnect() drops the ACL and the
+             * HID_SERVICE_DISCONNECTED subevent may never arrive. */
+            le_remove_active_by_handle(h);
+
             if (le_connection_handle == HCI_CON_HANDLE_INVALID)
                 break;
-            hci_con_handle_t h = hci_event_disconnection_complete_get_connection_handle(packet);
             if (h != le_connection_handle)
                 break;
             printf("[ble] LE disconnected (state was %d) — back to scan/reconnect loop\n",

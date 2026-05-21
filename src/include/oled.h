@@ -26,6 +26,11 @@
 #define OLED_W 128
 #define OLED_H 64
 
+/* Single-cell horizontal ellipsis glyph.  Drawn in the width of one
+ * normal character (three baseline dots) — use it as a compact "more
+ * text follows" marker.  See the font table in oled.c. */
+#define OLED_CH_ELLIPSIS '\x7f'
+
 /* Initialise I2C, probe for the panel, send the boot command sequence.
  * Returns false if the panel doesn't ACK on the configured address —
  * callers should treat that as "no OLED wired up" and skip further
