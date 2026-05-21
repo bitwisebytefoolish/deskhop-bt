@@ -17,6 +17,7 @@ If you're looking for the upstream wired version, see [README.md](README.md).
 - [Building](#building)
 - [Flashing each board](#flashing-each-board)
 - [Pairing flow](#pairing-flow)
+- [OLED device-management UI](#oled-device-management-ui)
 - [LED feedback states](#led-feedback-states)
 - [Tested peripherals](#tested-peripherals)
 - [Wiping bonds (factory reset)](#wiping-bonds-factory-reset)
@@ -32,6 +33,7 @@ If you're looking for the upstream wired version, see [README.md](README.md).
 - **BLE HID-over-GATT (HOGP) host** — pairs with modern BLE-only peripherals (8BitDo, Logitech BLE mice, BLE numpads) via BTstack's `hids_client`. Required for modern mice and most 2018+ keyboards that no longer ship Classic.
 - **Multi-device support** — up to **4 simultaneous bonded HID devices** on the BT-host board. Mix and match keyboards, mice, keypads in any combination on the same chip.
 - **Persistent bonds** — bonds stored in flash via BTstack's TLV bank; devices reconnect automatically on cold boot, no re-pairing required.
+- **On-device OLED UI (optional)** — an SSD1306 128×64 OLED + three buttons on board A provide a live status screen and a menu to **pair new devices, forget bonds, list paired devices**, and an **About** screen — no host-side tool or UART cable needed. Persisted friendly names show in the list. The panel is optional at runtime: builds without one fall back to the headless behaviour. See [OLED device-management UI](#oled-device-management-ui).
 - **Cheaper output peer** — board B can be a stock Raspberry Pi Pico (RP2040), since only board A needs a radio.
 
 ---
@@ -122,6 +124,8 @@ cmake --build build-pico2w -j
 # → build-pico2w/deskhop.uf2
 ```
 
+This enables the [OLED device-management UI](#oled-device-management-ui) by default (`DH_OLED_UI=ON` for `pico2_w`). It's safe to flash whether or not a panel is wired — the UI no-ops if no OLED is detected. To build the headless "lite" variant (no OLED/button code compiled in, always auto-pair), pass `-DDH_OLED_UI=0`. Pre-built `.uf2`s for each variant are attached to every [GitHub release](https://github.com/bitwisebytefoolish/deskhop-bt/releases) (`deskhop-bt-A-pico2w-oled.uf2` for board A; `deskhop-bt-B-pico.uf2` / `-B-pico2w.uf2` for board B).
+
 ### Build board B (output peer)
 
 Option 1 — RP2040 (cheapest):
@@ -167,7 +171,11 @@ If you want a hotkey that drops a specific board directly into BOOTSEL without p
 
 ## Pairing flow
 
-**Current behavior:** the BT-host firmware on board A scans / inquires continuously while it has free slots, and **any Bluetooth keyboard / mouse / keypad in pairing mode auto-pairs** the moment its advertisement or inquiry response is seen. Just-works pairing is auto-confirmed; no PIN entry is needed.
+There are two pairing models depending on the build / hardware:
+
+### Auto-pair (lite build, or OLED build with no panel detected)
+
+The BT-host firmware scans / inquires continuously while it has free slots, and **any Bluetooth keyboard / mouse / keypad in pairing mode auto-pairs** the moment its advertisement or inquiry response is seen. Just-works pairing is auto-confirmed; no PIN entry is needed. This is the behaviour of the `v1.0.0-bt` "lite" build, and of the OLED build when no panel is wired (so a headless unit is still usable).
 
 To pair a device:
 
@@ -175,15 +183,71 @@ To pair a device:
 2. Wait. Within ~5 seconds you should see the on-board LED settle into the "connected" pattern (4 flashes) — see [LED feedback states](#led-feedback-states) below.
 3. The device is now bonded and persists across cold boots.
 
-Once 4 devices are bonded and connected, the host stops accepting new pairings until one is forgotten. ([#22](https://github.com/bitwisebytefoolish/deskhop-bt/issues/22) tracks the LCD UI for explicit forget / re-pair / "pair next device" control. Until that lands, the only way to release a slot is to wipe all bonds — see [Wiping bonds](#wiping-bonds-factory-reset).)
+### Opt-in pairing (OLED build with a panel present)
+
+When an OLED panel is detected at boot, pairing is **closed by default** — the host ignores unbonded advertisers and declines their pairing requests, so a forgotten device can't silently re-pair. To add a device you open a temporary pairing window from the menu: **SELECT → Pair new device**. The screen shows a 60-second countdown with a bouncing "scanning" dot; put your device into pairing mode during the window. Bonded devices reconnect at any time regardless of the window. See [OLED device-management UI](#oled-device-management-ui).
+
+### Slot limit
+
+Once 4 devices are bonded and connected, the host stops accepting new pairings until one is forgotten. On an OLED build you forget devices from the menu (**Paired devices → SELECT → Forget device**, or **Forget all bonds**). On a lite build the only way to release a slot is to wipe all bonds — see [Wiping bonds](#wiping-bonds-factory-reset).
 
 If you want to watch the pairing flow live, attach a UART debug cable to the BT-host board (UART1 pins, 115200 8N1) and the firmware prints a per-event trace.
 
 ---
 
+## OLED device-management UI
+
+Board A optionally drives a **128×64 SSD1306 OLED** (I2C) plus three buttons — **UP**, **DOWN**, **SELECT** — for live Bluetooth device management with no host tool or UART cable. This is the default for the `pico2_w` build (`DH_OLED_UI=ON`); the `pico` / lite build omits it entirely.
+
+The panel is optional **at runtime**: if no OLED ACKs on the I2C bus at boot, the UI quietly no-ops and the firmware behaves like the lite build (including reverting to [auto-pair](#pairing-flow)).
+
+### Wiring
+
+| OLED pin | Pico 2 W   |
+|----------|------------|
+| SDA      | GP0 (I2C0) |
+| SCL      | GP1 (I2C0) |
+| VCC      | 3V3        |
+| GND      | GND        |
+
+I2C address `0x3C` (some panels are `0x3D`), 400 kHz fast-mode.
+
+Buttons are momentary push-buttons wired **GPIO → button → GND**, using the RP2350's internal pull-ups (no external resistors needed):
+
+| Button   | Pin  |
+|----------|------|
+| UP       | GP19 |
+| DOWN     | GP20 |
+| SELECT   | GP21 |
+
+These GPIOs are otherwise unused on the deskhop carrier, so the typical bring-up is a jumper from the unused header pins to a small breadboard with three tactile switches. Pin assignments live in [`src/include/pinout.h`](src/include/pinout.h).
+
+### Navigation
+
+Button hints are drawn on-screen as glyphs: **○** = SELECT, **↑ / ↓** = UP / DOWN.
+
+- **SELECT** = click (activate / enter); **hold SELECT** (≥ 500 ms) = back / cancel.
+- **UP / DOWN** move the `>` cursor.
+- Any non-status screen auto-reverts to the status screen after ~10 s of no input.
+
+### Screens
+
+- **Status** (always-on): the active-output letter (**A** / **B**) at large size, a Bluetooth icon that flashes while the radio comes up then goes solid, an "N of M paired" counter, and a row per connected device with a type icon (keyboard / mouse / keypad / generic), its name, and a connection dot. Long names scroll (marquee) with a single-cell "…" overflow hint. Empty slots read "- free".
+- **Menu** (SELECT from status): **Paired devices**, **Pair new device**, **Forget all bonds**, **About**.
+- **Paired devices**: every bonded device (connected or not) with a connection-status dot. SELECT opens **device info** (full address, status) with a **Forget device** action.
+- **Pair new device**: opens a 60-second [opt-in pairing window](#pairing-flow) with a countdown and a bouncing "scanning" dot; shows a "Paired!" splash with the device name on success.
+- **Forget all bonds**: confirm-gated wipe of every bond.
+- **About**: title, firmware version, build date, author, and fork credit.
+
+### Friendly names
+
+Device names are harvested from advertising data and, for devices that don't advertise a name (e.g. the 8BitDo Retro), read from the **GAP Device Name** characteristic (0x2A00) over GATT after connect. Names are persisted in a flash TLV table so they survive reboots and show in the device list even before reconnect.
+
+---
+
 ## LED feedback states
 
-The on-board CYW43 LED on board A doubles as a Bluetooth diagnostic indicator. The pattern is **sticky**: it shows the *latest* state of the BT subsystem and keeps looping until something changes.
+The on-board CYW43 LED on board A doubles as a Bluetooth diagnostic indicator. The pattern is **sticky**: it shows the *latest* state of the BT subsystem and keeps looping until something changes. On an OLED build the screen supersedes the LED for routine status — the LED is most useful on the lite build or for diagnosing a failure code.
 
 ### Stage patterns (N flashes, pause, repeat)
 
@@ -242,6 +306,8 @@ Devices verified working in real hardware as of 2026-05-20. **Status legend:** �
 | BLE mouse, descriptor ~97 B (Logitech-class, static random address) | random | Uses `ADV_DIRECT_IND` on reconnect; needs the cold-boot reconnect fix from [#38](https://github.com/bitwisebytefoolish/deskhop-bt/pull/38) | ✅ |
 | BLE keyboard, descriptor ~345 B (random address) | random | Uses `ADV_DIRECT_IND` on reconnect | ✅ |
 | BLE keypad, descriptor ~210 B (public address) | public | Uses `ADV_IND` (undirected) — straightforward case | ✅ |
+
+Named devices verified: **8BitDo Retro Mechanical Keyboard** (BLE; name resolved over GATT) and **Logitech MX Master** (BLE mouse).
 
 ### BT Classic HID
 
@@ -305,8 +371,8 @@ After either method, the next boot should log `LE device DB has 0/32 bonded entr
 
 ## Known limitations
 
-- **No explicit pairing trigger.** Any peripheral in pairing mode auto-bonds while a slot is free. There's no "enter pairing mode" hotkey or physical button — tracked in [#7](https://github.com/bitwisebytefoolish/deskhop-bt/issues/7) and [#22](https://github.com/bitwisebytefoolish/deskhop-bt/issues/22) (LCD UI).
-- **No per-device forget / rename / preferred-reconnect.** Same caveat — UX deferred to the LCD UI work.
+- **Explicit pairing control needs the OLED UI.** On an OLED build with a panel, pairing is opt-in (**Pair new device** opens a timed window) and you can forget devices from the menu — see [OLED device-management UI](#oled-device-management-ui). On the **lite build** (or an OLED build with no panel) there's no pairing trigger or per-device forget: any peripheral in pairing mode auto-bonds while a slot is free, and the only way to release a slot is to wipe all bonds. Tracked in [#7](https://github.com/bitwisebytefoolish/deskhop-bt/issues/7) and [#22](https://github.com/bitwisebytefoolish/deskhop-bt/issues/22).
+- **No rename / preferred-reconnect.** The OLED UI lists, pairs, and forgets devices, but per-device rename and a preferred-reconnect choice aren't implemented yet — remaining scope on [#22](https://github.com/bitwisebytefoolish/deskhop-bt/issues/22).
 - **REPORT-mode HID descriptor parsing is BOOT-mode-only on Classic.** N-key rollover and media keys may not pass through cleanly on Classic peripherals. BLE HOGP uses report mode and is unaffected. Tracked in the same Phase-1 group.
 - **No gamepad support.** Xbox / Switch Pro tracked in [#24](https://github.com/bitwisebytefoolish/deskhop-bt/issues/24).
 - **No N-output star topology.** The current 2-board architecture only drives 2 host PCs. 3+ outputs via a shared UART bus is tracked in [#23](https://github.com/bitwisebytefoolish/deskhop-bt/issues/23).
