@@ -16,6 +16,7 @@ Fast two-PC keyboard / mouse switching with wireless Bluetooth peripherals. No d
 - **BLE HID-over-GATT (HOGP) host** — pairs with modern BLE-only mice and keyboards (8BitDo, BLE mice, BLE numpads).
 - **Up to 4 simultaneous bonded peripherals** on one chip. Mix keyboards, mice, and keypads freely.
 - **Persistent bonds** stored in flash — devices reconnect automatically on cold boot.
+- **Optional on-device OLED UI** — an SSD1306 OLED + three buttons on board A let you pair new devices, list and forget bonds, and view an About screen, all on-device. Optional at runtime: builds without a panel run headless. See [BLUETOOTH.md → OLED device-management UI](BLUETOOTH.md#oled-device-management-ui).
 - **Cheaper output peer** — board B can be a stock Raspberry Pi Pico (RP2040); only board A needs a radio.
 - **No host-side software** — your PCs see the deskhop as a normal USB HID composite device, exactly as before.
 
@@ -87,7 +88,7 @@ The classic deskhop hotkey (`Left Ctrl + Caps Lock`, default — fully remappabl
    cmake --build build-pico -j
    ```
 4. **Flash** each board via BOOTSEL (hold button, plug USB, drag-drop the matching `.uf2`).
-5. **Pair** — power both boards together, put each BT peripheral into pairing mode; the LED on board A confirms each pair. See [BLUETOOTH.md → Pairing flow](BLUETOOTH.md#pairing-flow).
+5. **Pair** — power both boards together, then either let devices auto-pair (lite build) or open the pairing window from the OLED menu (**Pair new device**). See [BLUETOOTH.md → Pairing flow](BLUETOOTH.md#pairing-flow).
 
 ### Full walkthrough
 
@@ -96,6 +97,7 @@ See **[BLUETOOTH.md](BLUETOOTH.md)** for:
 - Detailed toolchain setup per OS
 - Carrier modification photo / diagram
 - `FORCE_BOARD_ROLE` build-time override if you don't want to solder
+- The optional [OLED device-management UI](BLUETOOTH.md#oled-device-management-ui) (wiring, navigation, screens)
 - LED feedback states (sticky-stage indicator with 1-7 stages + error codes)
 - Tested peripherals matrix
 - Wiping bonds (factory reset, picotool + nuke-firmware fallback)
