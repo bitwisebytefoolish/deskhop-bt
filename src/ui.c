@@ -523,7 +523,22 @@ void ui_render_task(device_t *state) {
      * cursor position. */
     button_event_t bev;
     while (buttons_poll(&bev)) {
+        printf("[btn] event button=%d (%s) kind=%s -> state=%d\n",
+               bev.button,
+               bev.button == BTN_UP ? "UP" :
+               bev.button == BTN_DOWN ? "DOWN" :
+               bev.button == BTN_SELECT ? "SELECT" : "?",
+               bev.kind == BTN_EVT_LONG ? "LONG" : "CLICK",
+               (int)ui.state);
         handle_button_event(&bev);
+    }
+
+    /* Throttled raw-state dump for button bring-up (#22).  Once a
+     * second at 30 Hz.  Remove (or gate behind a flag) before merge. */
+    static uint32_t dbg_tick;
+    if (++dbg_tick >= 30) {
+        dbg_tick = 0;
+        buttons_debug_print();
     }
 
     check_inactivity();

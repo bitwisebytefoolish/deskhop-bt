@@ -55,6 +55,11 @@ void buttons_init(void);
  * FIFO order.  Called from the UI task. */
 bool buttons_poll(button_event_t *out);
 
+/* Diagnostic: print raw pin levels + IRQ edge counters to the debug
+ * UART.  Call from the UI task (normal context); cheap to call at a
+ * throttled rate.  Used during button bring-up (#22 Phase 2). */
+void buttons_debug_print(void);
+
 #else  /* DH_OLED_UI not defined — stubs */
 
 typedef struct { int _unused; } button_event_t;

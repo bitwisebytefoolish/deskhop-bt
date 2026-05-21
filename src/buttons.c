@@ -13,9 +13,20 @@
 
 #ifdef DH_OLED_UI
 
+#include <stdio.h>
 #include "hardware/gpio.h"
 #include "buttons.h"
 #include "pinout.h"
+
+/* ---- Diagnostics (issue #22 button bring-up) -------------------------
+ * Edge counters incremented in the IRQ; raw levels read on demand.
+ * Printed from the UI task (normal context) — never printf() from the
+ * IRQ itself, which can deadlock on the pico-sdk stdio mutex if the
+ * foreground code is mid-print. */
+volatile uint32_t buttons_dbg_fall[BTN__COUNT];
+volatile uint32_t buttons_dbg_rise[BTN__COUNT];
+volatile uint32_t buttons_dbg_irq_total;
+volatile uint32_t buttons_dbg_unmatched;  /* IRQs whose GPIO didn't map to a button */
 
 /* ---- Pin ↔ button mapping --------------------------------------------
  * Index by button_id_t.  Single source of truth: pinout.h's
@@ -69,8 +80,12 @@ static int8_t pin_to_button(uint gpio) {
 }
 
 static void gpio_irq_callback(uint gpio, uint32_t events) {
+    buttons_dbg_irq_total++;
     int8_t b = pin_to_button(gpio);
-    if (b < 0) return;  /* defensive — shouldn't happen, we only enabled our pins */
+    if (b < 0) { buttons_dbg_unmatched++; return; }  /* not one of our pins */
+
+    if (events & GPIO_IRQ_EDGE_FALL) buttons_dbg_fall[b]++;
+    if (events & GPIO_IRQ_EDGE_RISE) buttons_dbg_rise[b]++;
 
     uint64_t now = time_us_64();
 
@@ -131,6 +146,32 @@ bool buttons_poll(button_event_t *out) {
     *out = ring[ring_tail];
     ring_tail = (uint8_t)((ring_tail + 1) % BTN_RING_CAP);
     return true;
+}
+
+void buttons_debug_print(void) {
+    /* Raw line levels: with internal pull-ups, idle reads 1, a press
+     * to GND reads 0.  If a press never flips the level here, the
+     * problem is wiring (button not connected, wrong pin, no GND) —
+     * not the IRQ or queue.
+     *
+     * Edge counters: how many falling / rising edges the IRQ has seen
+     * per button.  If levels flip but these stay 0, the IRQ callback
+     * isn't being invoked (registration overridden, or IRQ not
+     * enabled on the pin).
+     *
+     * irq=total raw GPIO IRQ invocations; unmatched=IRQs whose GPIO
+     * wasn't one of ours (would indicate a shared-callback collision
+     * with another subsystem). */
+    printf("[btn] pins U/D/S=%d/%d/%d  fall=%lu/%lu/%lu  rise=%lu/%lu/%lu  irq=%lu unmatched=%lu\n",
+           gpio_get(UI_BUTTON_UP), gpio_get(UI_BUTTON_DOWN), gpio_get(UI_BUTTON_SELECT),
+           (unsigned long)buttons_dbg_fall[BTN_UP],
+           (unsigned long)buttons_dbg_fall[BTN_DOWN],
+           (unsigned long)buttons_dbg_fall[BTN_SELECT],
+           (unsigned long)buttons_dbg_rise[BTN_UP],
+           (unsigned long)buttons_dbg_rise[BTN_DOWN],
+           (unsigned long)buttons_dbg_rise[BTN_SELECT],
+           (unsigned long)buttons_dbg_irq_total,
+           (unsigned long)buttons_dbg_unmatched);
 }
 
 #endif /* DH_OLED_UI */
