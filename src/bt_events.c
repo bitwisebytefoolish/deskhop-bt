@@ -87,11 +87,12 @@ void bt_events_publish(const bt_event_t *evt) {
         }
         case BT_EVT_DEVICE_PAIRED:
             /* Bonded count bookkeeping is owned by the BTstack TLV; we
-             * don't infer it here.  The HCI_STATE_WORKING handler calls
-             * bt_events_set_bonded_count() with le_device_db_count().
-             * On a fresh pair, that handler also re-counts and updates
-             * the cache. */
-            if (bonded_count_cache < 32) bonded_count_cache++;
+             * don't infer it here.  bt_hid_host_le.c's SM_EVENT_IDENTITY_
+             * CREATED handler calls bt_events_set_bonded_count() with the
+             * authoritative le_device_db_count() AFTER the new bond is in
+             * the DB, then publishes this event.  Incrementing here would
+             * double-count the just-added bond ("2 of 3" with 2 bonds), so
+             * we deliberately do nothing to the count. */
             break;
         default:
             break;

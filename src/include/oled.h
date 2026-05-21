@@ -26,6 +26,11 @@
 #define OLED_W 128
 #define OLED_H 64
 
+/* Single-cell horizontal ellipsis glyph.  Drawn in the width of one
+ * normal character (three baseline dots) — use it as a compact "more
+ * text follows" marker.  See the font table in oled.c. */
+#define OLED_CH_ELLIPSIS '\x7f'
+
 /* Initialise I2C, probe for the panel, send the boot command sequence.
  * Returns false if the panel doesn't ACK on the configured address —
  * callers should treat that as "no OLED wired up" and skip further
@@ -73,6 +78,7 @@ extern const uint8_t oled_icon_keypad[8];
 extern const uint8_t oled_icon_generic[8];
 extern const uint8_t oled_icon_dot_full[8];
 extern const uint8_t oled_icon_dot_empty[8];
+extern const uint8_t oled_icon_bt[8];
 
 /* Push the in-RAM framebuffer to the panel.  ~25 ms at 400 kHz.  No-op
  * if the panel isn't present (oled_init returned false). */
