@@ -137,6 +137,51 @@ static bool le_extract_local_name(const uint8_t *ad_data, uint8_t ad_len, char *
     }
     return false;
 }
+
+/* Classify a HID report descriptor by its top-level application usage.
+ * Walks the descriptor items (respecting item sizes so we never match
+ * a data byte by accident), tracks the current Usage Page, and returns
+ * on the first Usage that sits on the Generic Desktop page (0x01):
+ *   Usage 0x02 = Mouse, 0x06 = Keyboard, 0x07 = Keypad.
+ * Anything else (or a descriptor we can't make sense of) → UNKNOWN,
+ * which the UI renders with the generic device glyph.
+ *
+ * HID item prefix byte: bits[1:0]=size code, bits[3:2]=type
+ * (0=Main,1=Global,2=Local), bits[7:4]=tag.  Size code 3 means 4
+ * data bytes; 0/1/2 mean that many bytes.  0xFE = long item. */
+static bt_evt_kind_t le_classify_hid_descriptor(const uint8_t *desc, uint16_t len) {
+    uint16_t usage_page = 0;
+    uint16_t i = 0;
+    while (i < len) {
+        uint8_t prefix = desc[i++];
+        if (prefix == 0xFE) {              /* long item */
+            if (i >= len) break;
+            uint8_t data_size = desc[i++];
+            i += 1 + data_size;            /* skip long tag + data */
+            continue;
+        }
+        uint8_t size_code = prefix & 0x03;
+        uint8_t data_len   = (size_code == 3) ? 4 : size_code;
+        uint8_t type       = (prefix >> 2) & 0x03;
+        uint8_t tag        = (prefix >> 4) & 0x0F;
+
+        uint32_t data = 0;
+        for (uint8_t b = 0; b < data_len && (i + b) < len; b++)
+            data |= (uint32_t)desc[i + b] << (8 * b);
+
+        if (type == 1 && tag == 0x0) {            /* Global: Usage Page */
+            usage_page = (uint16_t)data;
+        } else if (type == 2 && tag == 0x0) {     /* Local: Usage */
+            if (usage_page == 0x01) {             /* Generic Desktop */
+                if (data == 0x02) return BT_KIND_MOUSE;
+                if (data == 0x06) return BT_KIND_KEYBOARD;
+                if (data == 0x07) return BT_KIND_KEYPAD;
+            }
+        }
+        i += data_len;
+    }
+    return BT_KIND_UNKNOWN;
+}
 #endif /* DH_OLED_UI */
 
 /* ---- Shared state -------------------------------------------------- */
@@ -557,15 +602,32 @@ static void le_hids_client_event_handler(uint8_t packet_type, uint16_t channel,
              * tail until the name is resolved by a future GATT read
              * (Phase 2/3). */
             {
+                /* Classify the device from its HID report descriptor
+                 * (service 0) so the UI can show a keyboard / mouse /
+                 * keypad icon.  Falls back to UNKNOWN → generic glyph
+                 * if the descriptor is empty or unrecognised. */
+                bt_evt_kind_t kind = BT_KIND_UNKNOWN;
+                const uint8_t *desc =
+                    hids_client_descriptor_storage_get_descriptor_data(connected_cid, 0);
+                uint16_t desc_len =
+                    hids_client_descriptor_storage_get_descriptor_len(connected_cid, 0);
+                if (desc && desc_len)
+                    kind = le_classify_hid_descriptor(desc, desc_len);
+
                 bt_event_t e = {
                     .type      = BT_EVT_DEVICE_CONNECTED,
                     .transport = BT_TRANSPORT_LE,
+                    .kind      = kind,
                     .cid       = connected_cid,
                     .ts_us     = time_us_64(),
                 };
                 bt_evt_addr_from_bd(&e.addr, le_remote.addr);
                 strncpy(e.name, le_name_cache_get(le_remote.addr), BT_EVT_NAME_MAX - 1);
                 bt_events_publish(&e);
+                printf("[ble] device kind=%s\n",
+                       kind == BT_KIND_KEYBOARD ? "keyboard" :
+                       kind == BT_KIND_MOUSE    ? "mouse" :
+                       kind == BT_KIND_KEYPAD   ? "keypad" : "unknown");
             }
 #endif
             /* Persist this device address for fast direct-reconnect on
