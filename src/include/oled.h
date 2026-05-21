@@ -46,8 +46,33 @@ void oled_invert_rect(int x, int y, int w, int h);
  * past the right edge is clipped, not wrapped. */
 void oled_text(int x_pixels, int row, const char *s);
 
+/* Same as oled_text but with arbitrary pixel-Y position and a scale
+ * factor.  scale=1 matches oled_text exactly (6x8 per char); scale=2
+ * draws 12x16 "fat-pixel" glyphs for hero-sized text; scale=3 etc.
+ * also work but consume the screen fast.  Each source-pixel becomes
+ * a scale x scale block. */
+void oled_text_at(int x_pixels, int y_pixels, int scale, const char *s);
+
 /* Convenience: clear a single row (8 px high) to black. */
 void oled_clear_row(int row);
+
+/* Draw a packed monochrome bitmap at (x, y).  Format matches the
+ * SSD1306 framebuffer layout:
+ *   bm[col + page*w] = vertical 8-pixel slice, bit 0 = top pixel
+ *                      within that slice.
+ * For h <= 8, the bitmap is one page tall and bm is w bytes total.
+ * For h > 8, stack pages: e.g. h=16 needs 2 pages × w bytes.  Set
+ * bits draw on; clear bits are no-ops (icons composite cleanly over
+ * existing content). */
+void oled_draw_icon(int x, int y, int w, int h, const uint8_t *bm);
+
+/* Public 8x8 icons.  All column-major, bit 0 = top. */
+extern const uint8_t oled_icon_kbd[8];
+extern const uint8_t oled_icon_mouse[8];
+extern const uint8_t oled_icon_keypad[8];
+extern const uint8_t oled_icon_generic[8];
+extern const uint8_t oled_icon_dot_full[8];
+extern const uint8_t oled_icon_dot_empty[8];
 
 /* Push the in-RAM framebuffer to the panel.  ~25 ms at 400 kHz.  No-op
  * if the panel isn't present (oled_init returned false). */

@@ -330,6 +330,104 @@ void oled_text(int x_pixels, int row, const char *s) {
     }
 }
 
+void oled_text_at(int x_pixels, int y_pixels, int scale, const char *s) {
+    if (scale < 1) scale = 1;
+    /* Fast path: scale=1 with row-aligned y is what oled_text already
+     * does cheaply (one byte per column write).  Defer to it. */
+    if (scale == 1 && (y_pixels & 7) == 0) {
+        oled_text(x_pixels, y_pixels >> 3, s);
+        return;
+    }
+    /* General path: render each font pixel as a scale x scale block
+     * via oled_set_pixel.  Slower (per-pixel writes) but supports any
+     * (x, y) origin and any scale.  At 30 Hz with one or two scaled
+     * strings per frame, the wallclock cost is negligible. */
+    int x = x_pixels;
+    while (*s) {
+        unsigned char c = (unsigned char)*s++;
+        if (c < 0x20 || c > 0x7F) c = 0x7F;
+        const uint8_t *glyph = font6x8[c - 0x20];
+        for (int gc = 0; gc < 6; gc++) {
+            uint8_t col_bits = glyph[gc];
+            for (int gr = 0; gr < 8; gr++) {
+                if ((col_bits >> gr) & 1u) {
+                    int px0 = x + gc * scale;
+                    int py0 = y_pixels + gr * scale;
+                    for (int dy = 0; dy < scale; dy++) {
+                        for (int dx = 0; dx < scale; dx++) {
+                            oled_set_pixel(px0 + dx, py0 + dy, true);
+                        }
+                    }
+                }
+            }
+        }
+        x += 6 * scale;
+        if (x >= OLED_W) break;
+    }
+}
+
+void oled_draw_icon(int x, int y, int w, int h, const uint8_t *bm) {
+    int pages = (h + 7) / 8;
+    for (int p = 0; p < pages; p++) {
+        for (int col = 0; col < w; col++) {
+            uint8_t b = bm[p * w + col];
+            for (int bit = 0; bit < 8; bit++) {
+                int py = y + p * 8 + bit;
+                if (py >= y + h) break;
+                if ((b >> bit) & 1u) {
+                    oled_set_pixel(x + col, py, true);
+                }
+            }
+        }
+    }
+}
+
+/* ---- Public 8x8 icons -----------------------------------------------
+ *
+ * Each icon is 8 columns x 8 rows, stored as 8 bytes in column-major
+ * order with bit 0 = top pixel of the column.  Hand-drawn for the
+ * Phase 1 status screen redesign (#22).  Visual reference rendered
+ * top-to-bottom on the SSD1306 panel:
+ *
+ *   kbd:               mouse:             keypad:
+ *   ........           .#####..           ........
+ *   ########           #.....#.           .#.#.#..
+ *   #......#           #.#.#.#.           ........
+ *   #.#.#..#           #.....#.           .#.#.#..
+ *   #......#           #.....#.           ........
+ *   ########           #.....#.           .#.#.#..
+ *   ........           #.....#.           ........
+ *   ........           .#####..           ........
+ *
+ *   generic ("?"):     dot_full (●):      dot_empty (○):
+ *   .#####..           ........           ........
+ *   #.....#.           ..###...           ..###...
+ *   #.....#.           .#####..           .#...#..
+ *   ....#.#.           .#####..           .#...#..
+ *   ...#....           .#####..           .#...#..
+ *   ........           ..###...           ..###...
+ *   ...#....           ........           ........
+ *   ........           ........           ........
+ */
+const uint8_t oled_icon_kbd[8] = {
+    0x3E, 0x22, 0x2A, 0x22, 0x2A, 0x22, 0x22, 0x3E,
+};
+const uint8_t oled_icon_mouse[8] = {
+    0x7E, 0x81, 0x85, 0x81, 0x85, 0x81, 0x81, 0x7E,
+};
+const uint8_t oled_icon_keypad[8] = {
+    0x00, 0x2A, 0x00, 0x2A, 0x00, 0x2A, 0x00, 0x00,
+};
+const uint8_t oled_icon_generic[8] = {
+    0x02, 0x01, 0x01, 0x59, 0x09, 0x06, 0x00, 0x00,
+};
+const uint8_t oled_icon_dot_full[8] = {
+    0x00, 0x1C, 0x3E, 0x3E, 0x3E, 0x1C, 0x00, 0x00,
+};
+const uint8_t oled_icon_dot_empty[8] = {
+    0x00, 0x1C, 0x22, 0x22, 0x22, 0x1C, 0x00, 0x00,
+};
+
 void oled_flush(void) {
     if (!panel_present) return;
 

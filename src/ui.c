@@ -173,42 +173,77 @@ static void render_status(uint8_t active_output) {
 
     oled_clear();
 
-    char hdr[24];
-    char active_side = (active_output == 0) ? 'A' : 'B';
-    const char *bt_health;
-    if (active_count > 0)      bt_health = "OK";
-    else if (bonded_count > 0) bt_health = "..";
-    else                       bt_health = "--";
-    snprintf(hdr, sizeof(hdr), "%c   BT:%s  %u/%u",
-             active_side, bt_health, active_count, bonded_count);
-    oled_text(0, 0, hdr);
+    /* ── Header (y=0-13): hero-sized active-output letter + BT meta ──
+     *
+     * Scale-2 "A" or "B" at top-left is the single piece of info the
+     * user reads at a glance.  Renders into pixels y=2..13 (the "A"
+     * glyph only uses font rows 1-6, which at scale 2 lands at y=2-13
+     * — see oled_text_at).  Leaves the right side of the header band
+     * (x=16..127) for two stacked lines of small text: "BT:STATE" on
+     * the top and the bonded/active counter underneath. */
+    char letter[2] = { (active_output == 0) ? 'A' : 'B', '\0' };
+    oled_text_at(0, 0, 2, letter);
 
-    for (int x = 0; x < OLED_W; x++) oled_set_pixel(x, 9, true);
+    const char *bt_state;
+    if (active_count > 0)      bt_state = "BT: ready";
+    else if (bonded_count > 0) bt_state = "BT: idle";
+    else                       bt_state = "BT: empty";
+    oled_text_at(28, 0, 1, bt_state);
 
-    int row = 2;
-    for (int i = 0; i < BT_ACTIVE_CAP && row <= 5; i++) {
-        if (!active[i].in_use) continue;
-        char line[24];
-        if (active[i].name[0] == '\0') {
-            char short_addr[12];
-            fmt_addr_short(short_addr, sizeof(short_addr), active[i].addr.bytes);
-            snprintf(line, sizeof(line), "* %s", short_addr);
+    char counter[16];
+    snprintf(counter, sizeof(counter), "%u of %u bonded",
+             active_count, bonded_count);
+    oled_text_at(28, 8, 1, counter);
+
+    /* ── Divider at y=14 ────────────────────────────────────────────
+     * 1-pixel rule between the header band and the body.  The scale-2
+     * letter above doesn't light any pixels in y=14-15 (the source
+     * font row 7 is blank), so the rule has clean breathing room. */
+    for (int x = 0; x < OLED_W; x++) oled_set_pixel(x, 14, true);
+
+    /* ── Body: all 4 hids_client slots, one per 8-pixel row ─────────
+     * Always render the full 4 — connected slots show an icon + name
+     * + filled connection dot; empty slots show an open circle +
+     * "(slot free)".  Consistent visual cadence regardless of how
+     * many devices are connected; the user sees the slot capacity
+     * directly instead of having to infer it. */
+    for (int i = 0; i < BT_ACTIVE_CAP; i++) {
+        int y = 16 + i * 8;
+        if (active[i].in_use) {
+            /* Device-type icon — for now, generic "device" glyph.
+             * Phase 3 work will populate a kind field on connect
+             * (parsed from the HID descriptor's app-usage page) so
+             * this can show distinct keyboard / mouse / keypad
+             * icons.  The icons are already defined in oled.h. */
+            oled_draw_icon(0, y, 8, 8, oled_icon_generic);
+            /* Name (or address tail as fallback). */
+            char line[22];
+            if (active[i].name[0]) {
+                snprintf(line, sizeof(line), "%s", active[i].name);
+            } else {
+                fmt_addr_short(line, sizeof(line), active[i].addr.bytes);
+            }
+            oled_text_at(10, y, 1, line);
+            /* Connection-state dot at the far right.  Filled = live. */
+            oled_draw_icon(120, y, 8, 8, oled_icon_dot_full);
         } else {
-            snprintf(line, sizeof(line), "* %s", active[i].name);
+            /* Empty slot row. */
+            oled_draw_icon(0, y, 8, 8, oled_icon_dot_empty);
+            oled_text_at(10, y, 1, "(slot free)");
         }
-        oled_text(0, row, line);
-        row++;
     }
 
-    if (active_count < BT_ACTIVE_CAP) {
-        char free_line[24];
-        snprintf(free_line, sizeof(free_line), "o %u free slot%s",
-                 (unsigned)(BT_ACTIVE_CAP - active_count),
-                 (BT_ACTIVE_CAP - active_count == 1) ? "" : "s");
-        oled_text(0, 6, free_line);
+    /* ── Status row at y=48-55: reserved for Phase 2/3 ──────────────
+     * Future: scanning state, last-paired banner, error code on
+     * failure.  Currently a thin separator + nothing, so the eye
+     * settles on the body before the footer. */
+    for (int x = 8; x < OLED_W - 8; x += 4) {
+        oled_set_pixel(x, 53, true);   /* dotted accent rule */
     }
 
-    oled_text(0, 7, "SEL: menu");
+    /* ── Footer at y=56-63: action hint ─────────────────────────── */
+    oled_text_at(0, 56, 1, "SEL: menu");
+
     oled_flush();
 }
 
