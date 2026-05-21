@@ -32,4 +32,16 @@
  * See issue #29 for design rationale and the 8BitDo Retro use case. */
 void bt_hid_host_le_init(bt_hid_state_t *bt_state);
 
+/* Forget a single bonded BLE device by address (#22 Phase 3).  Removes
+ * the matching LE device DB entry (TLV-backed, so it persists), tears
+ * down any live connection, and clears the fast-reconnect hint +
+ * persisted name.  Safe with an address that isn't bonded (no-op).
+ * `addr` is a 6-byte BD_ADDR. */
+void bt_hid_host_le_forget(const uint8_t *addr);
+
+/* Forget every bonded BLE device — disconnects all live links and wipes
+ * the LE device DB, the fast-reconnect hint, and the persisted name
+ * table.  The bulletproof "factory reset bonds" path. */
+void bt_hid_host_le_forget_all(void);
+
 #endif /* DH_BT_HID_HOST_KBD */

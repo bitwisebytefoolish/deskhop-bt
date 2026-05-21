@@ -244,6 +244,91 @@ static btstack_packet_callback_registration_t le_sm_cb;
 static const btstack_tlv_t *le_tlv_impl;
 static void                *le_tlv_ctx;
 
+#ifdef DH_OLED_UI
+/* ---- Persistent bonded-device name table (#22 Phase 3) ---------------
+ * Stored in the BTstack TLV flash bank under a custom tag so device
+ * friendly-names survive a reboot.  Without this the name cache is
+ * in-memory only: on cold boot a bonded peer reconnecting via directed
+ * adv (which carries no name in its payload) would show only its
+ * address tail.  Loading this table at HCI_STATE_WORKING seeds the
+ * in-memory cache so reconnects render names immediately.
+ *
+ * Written ONLY on a new pairing (SM_EVENT_IDENTITY_CREATED) and on
+ * forget — never on routine reconnect — so flash wear stays
+ * negligible (a TLV store is a log-append; rare writes are fine).
+ *
+ * The whole table is one TLV blob; capacity 16 mirrors the bond DB's
+ * useful range.  Keyed by the address we connect with, which for the
+ * static-random / public-identity peripherals this targets equals
+ * their identity address.  Gated on DH_OLED_UI since names are only
+ * consumed by the UI. */
+#define TLV_TAG_BNAM ((((uint32_t)'B')<<24)|(((uint32_t)'N')<<16)|(((uint32_t)'A')<<8)|'M')
+#define LE_BNAM_MAX 16
+typedef struct __attribute__((packed)) {
+    uint8_t addr[6];
+    char    name[BT_EVT_NAME_MAX];
+} le_bnam_entry_t;
+typedef struct __attribute__((packed)) {
+    uint8_t         count;
+    le_bnam_entry_t e[LE_BNAM_MAX];
+} le_bnam_table_t;
+static le_bnam_table_t le_bnam;
+
+static void le_bnam_save(void) {
+    if (!le_tlv_impl) return;
+    le_tlv_impl->store_tag(le_tlv_ctx, TLV_TAG_BNAM,
+                           (const uint8_t *)&le_bnam, sizeof(le_bnam));
+}
+
+static void le_bnam_load(void) {
+    if (!le_tlv_impl) return;
+    int n = le_tlv_impl->get_tag(le_tlv_ctx, TLV_TAG_BNAM,
+                                 (uint8_t *)&le_bnam, sizeof(le_bnam));
+    if (n != (int)sizeof(le_bnam) || le_bnam.count > LE_BNAM_MAX) {
+        memset(&le_bnam, 0, sizeof(le_bnam));
+        return;
+    }
+    /* Seed the in-memory cache so reconnects render names right away. */
+    for (int i = 0; i < le_bnam.count; i++)
+        le_name_cache_put(le_bnam.e[i].addr, le_bnam.e[i].name);
+}
+
+static void le_bnam_put(const uint8_t *addr, const char *name) {
+    if (!name || !name[0]) return;
+    for (int i = 0; i < le_bnam.count; i++) {
+        if (memcmp(le_bnam.e[i].addr, addr, 6) == 0) {
+            strncpy(le_bnam.e[i].name, name, BT_EVT_NAME_MAX - 1);
+            le_bnam.e[i].name[BT_EVT_NAME_MAX - 1] = '\0';
+            le_bnam_save();
+            return;
+        }
+    }
+    if (le_bnam.count >= LE_BNAM_MAX) return;  /* table full — skip */
+    memcpy(le_bnam.e[le_bnam.count].addr, addr, 6);
+    strncpy(le_bnam.e[le_bnam.count].name, name, BT_EVT_NAME_MAX - 1);
+    le_bnam.e[le_bnam.count].name[BT_EVT_NAME_MAX - 1] = '\0';
+    le_bnam.count++;
+    le_bnam_save();
+}
+
+static void le_bnam_remove(const uint8_t *addr) {
+    for (int i = 0; i < le_bnam.count; i++) {
+        if (memcmp(le_bnam.e[i].addr, addr, 6) == 0) {
+            if (i != le_bnam.count - 1)
+                le_bnam.e[i] = le_bnam.e[le_bnam.count - 1];
+            le_bnam.count--;
+            le_bnam_save();
+            return;
+        }
+    }
+}
+
+static void le_bnam_clear(void) {
+    memset(&le_bnam, 0, sizeof(le_bnam));
+    le_bnam_save();
+}
+#endif /* DH_OLED_UI */
+
 /* Currently-connected device table.  Populated by GATTSERVICE_SUBEVENT_
  * HID_SERVICE_CONNECTED and drained by GATTSERVICE_SUBEVENT_HID_SERVICE_
  * DISCONNECTED.  Filters scan results to skip advertisers we already
@@ -351,6 +436,13 @@ static void le_start_connect(void) {
      * "favourite-device" hint, even though we no longer drive a
      * fast-reconnect from it).  Keep the store path; drop the load path. */
     btstack_tlv_get_instance(&le_tlv_impl, &le_tlv_ctx);
+
+#ifdef DH_OLED_UI
+    /* Load persisted device names now that the TLV is available, seeding
+     * the in-memory name cache so reconnecting bonded peers render their
+     * names instead of an address tail. */
+    le_bnam_load();
+#endif
 
     /* The original design here cold-connected directly to the last-bonded
      * device via gap_connect(stored_address) without first seeing it
@@ -760,6 +852,10 @@ static void le_sm_packet_handler(uint8_t packet_type, uint16_t channel,
              * is the truth in case the increment race-loses against
              * a near-simultaneous load. */
             bt_events_set_bonded_count((uint8_t)le_device_db_count());
+            /* Persist the friendly name for this freshly-bonded peer so
+             * it survives reboot.  le_name_cache holds the name harvested
+             * from the undirected pairing adv we just connected through. */
+            le_bnam_put(le_remote.addr, le_name_cache_get(le_remote.addr));
             {
                 bt_event_t e = {
                     .type      = BT_EVT_DEVICE_PAIRED,
@@ -1012,6 +1108,96 @@ static void le_packet_handler(uint8_t packet_type, uint16_t channel,
 
         default: break;
     }
+}
+
+/* ---- Forget / bond removal (#22 Phase 3) ------------------------------
+ *
+ * Not gated on DH_OLED_UI — these are plain bond-DB operations.  Their
+ * only caller today is the OLED UI, but exposing them unconditionally
+ * (within DH_BT_HID_HOST_KBD) keeps them link-visible without extra
+ * guards.  Each removes the LE device DB entry (TLV-backed, so the
+ * removal persists), tears down any live connection to the device, and
+ * clears the fast-reconnect hint + persisted name. */
+
+/* Remove all LE device DB entries whose stored identity address matches
+ * `addr`.  Returns the number removed. */
+static int le_db_remove_by_addr(const uint8_t *addr) {
+    int removed = 0;
+    int maxn = le_device_db_max_count();
+    for (int i = 0; i < maxn; i++) {
+        int        type = (int)BD_ADDR_TYPE_UNKNOWN;
+        bd_addr_t  db_addr;
+        sm_key_t   irk;
+        le_device_db_info(i, &type, db_addr, irk);
+        if (type == (int)BD_ADDR_TYPE_UNKNOWN) continue;  /* empty slot */
+        if (memcmp(db_addr, addr, 6) == 0) {
+            le_device_db_remove(i);
+            removed++;
+        }
+    }
+    return removed;
+}
+
+void bt_hid_host_le_forget(const uint8_t *addr) {
+    /* Tear down a live connection to this device, if any.  Disconnecting
+     * via the HID client cid drives our normal SERVICE_DISCONNECTED path,
+     * which removes it from the active table, publishes the UI event, and
+     * resumes scanning. */
+    for (int i = 0; i < le_num_active; i++) {
+        if (memcmp(le_active[i].addr, addr, 6) == 0) {
+            hids_client_disconnect(le_active[i].hids_cid);
+            break;
+        }
+    }
+
+    int removed = le_db_remove_by_addr(addr);
+
+    /* Drop the fast-reconnect hint if it points at this device. */
+    if (le_tlv_impl) {
+        le_device_addr_t hint;
+        int n = le_tlv_impl->get_tag(le_tlv_ctx, TLV_TAG_HOGD,
+                                     (uint8_t *)&hint, sizeof(hint));
+        if (n == (int)sizeof(hint) && memcmp(hint.addr, addr, 6) == 0)
+            le_tlv_impl->delete_tag(le_tlv_ctx, TLV_TAG_HOGD);
+    }
+
+#ifdef DH_OLED_UI
+    le_bnam_remove(addr);
+    bt_events_set_bonded_count((uint8_t)le_device_db_count());
+#endif
+
+    printf("[ble] forget %02x:%02x:%02x:%02x:%02x:%02x — removed %d DB entr%s, DB now %d\n",
+           addr[0], addr[1], addr[2], addr[3], addr[4], addr[5],
+           removed, removed == 1 ? "y" : "ies", le_device_db_count());
+}
+
+void bt_hid_host_le_forget_all(void) {
+    /* Disconnect everything that's live. */
+    for (int i = 0; i < le_num_active; i++)
+        hids_client_disconnect(le_active[i].hids_cid);
+
+    int maxn = le_device_db_max_count();
+    int removed = 0;
+    for (int i = 0; i < maxn; i++) {
+        int        type = (int)BD_ADDR_TYPE_UNKNOWN;
+        bd_addr_t  db_addr;
+        sm_key_t   irk;
+        le_device_db_info(i, &type, db_addr, irk);
+        if (type == (int)BD_ADDR_TYPE_UNKNOWN) continue;
+        le_device_db_remove(i);
+        removed++;
+    }
+
+    if (le_tlv_impl)
+        le_tlv_impl->delete_tag(le_tlv_ctx, TLV_TAG_HOGD);
+
+#ifdef DH_OLED_UI
+    le_bnam_clear();
+    bt_events_set_bonded_count(0);
+#endif
+
+    printf("[ble] forget ALL — removed %d bond(s), DB now %d\n",
+           removed, le_device_db_count());
 }
 
 /* ---- public init ------------------------------------------------- */
