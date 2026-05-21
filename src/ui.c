@@ -106,6 +106,16 @@ static struct {
  * longer than this scroll (see marquee()). */
 #define UI_NAME_COLS 16
 
+/* Button-hint tokens: UP/DOWN arrows + SELECT circle glyphs (font slots
+ * 0x80..0x82).  "UP/DN" -> "↑/↓", "SEL" -> "○". */
+#define UI_H_UPDN  OLED_S_ARROW_UP "/" OLED_S_ARROW_DOWN
+#define UI_H_SEL   OLED_S_SEL
+
+/* Pair-new "scanning" ping-pong: a dot bounces left/right across this
+ * many character cells, dwelling UI_BOUNCE_STEP_US per cell. */
+#define UI_BOUNCE_CELLS   16
+#define UI_BOUNCE_STEP_US 110000ull
+
 /* ---- Helpers -------------------------------------------------------- */
 
 static uint32_t fnv1a(const void *data, size_t n) {
@@ -278,16 +288,16 @@ static void render_status(uint8_t active_output) {
             char line[40];
             if (active[i].name[0]) marquee(line, sizeof(line), active[i].name, UI_NAME_COLS, now);
             else                   fmt_addr_short(line, sizeof(line), active[i].addr.bytes);
-            oled_text_at(10, y, 1, line);
+            oled_text_at(12, y, 1, line);
             oled_draw_icon(120, y, 8, 8, oled_icon_dot_full);
         } else {
             oled_draw_icon(0, y, 8, 8, oled_icon_dot_empty);
-            oled_text_at(10, y, 1, "(slot free)");
+            oled_text_at(12, y, 1, "- free");
         }
     }
 
     for (int x = 8; x < OLED_W - 8; x += 4) oled_set_pixel(x, 53, true);
-    oled_text_at(0, 56, 1, "SEL: menu");
+    oled_text_at(0, 56, 1, UI_H_SEL ": menu");
     oled_flush();
 }
 
@@ -306,12 +316,10 @@ static void render_main_menu(void) {
     for (int i = 0; i < MENU__COUNT; i++) {
         int row = 2 + i;
         oled_text(6, row, MAIN_MENU_LABELS[i]);
-        if (i == ui.menu_cursor) {
+        if (i == ui.menu_cursor)
             oled_text(0, row, ">");
-            for (int x = 0; x < OLED_W; x++) oled_set_pixel(x, row * 8 + 7, true);
-        }
     }
-    oled_text(0, 7, "UP/DN SEL  hold=back");
+    oled_text(0, 7, UI_H_UPDN " " UI_H_SEL "  hold=back");
     oled_flush();
 }
 
@@ -327,7 +335,7 @@ static void render_device_list(void) {
     if (ui.bond_count == 0) {
         oled_text(0, 3, "(no bonds yet)");
         oled_text(0, 5, "Menu > Pair new");
-        oled_text(0, 7, "hold SEL: back");
+        oled_text(0, 7, "hold " UI_H_SEL ": back");
         oled_flush();
         return;
     }
@@ -347,16 +355,14 @@ static void render_device_list(void) {
         char line[40];
         if (b->name[0]) marquee(line, sizeof(line), b->name, UI_NAME_COLS, time_us_64());
         else            fmt_addr_short(line, sizeof(line), b->addr);
-        oled_text(18, row, line);
+        oled_text(20, row, line);
         oled_draw_icon(120, row * 8, 8, 8,
                        b->connected ? oled_icon_dot_full : oled_icon_dot_empty);
-        if (idx == ui.list_cursor) {
+        if (idx == ui.list_cursor)
             oled_text(0, row, ">");
-            for (int x = 0; x < OLED_W; x++) oled_set_pixel(x, row * 8 + 7, true);
-        }
     }
 
-    oled_text(0, 7, "UP/DN SEL info");
+    oled_text(0, 7, UI_H_UPDN " " UI_H_SEL " info");
     oled_flush();
 }
 
@@ -384,7 +390,7 @@ static void render_device_info(void) {
         oled_text(0, 0, "(gone)");
         for (int x = 0; x < OLED_W; x++) oled_set_pixel(x, 9, true);
         oled_text(0, 3, "No longer bonded.");
-        oled_text(0, 7, "hold SEL: back");
+        oled_text(0, 7, "hold " UI_H_SEL ": back");
         oled_flush();
         return;
     }
@@ -401,16 +407,23 @@ static void render_device_info(void) {
     for (int i = 0; i < INFO__COUNT; i++) {
         int row = 5 + i;
         oled_text(6, row, INFO_LABELS[i]);
-        if (i == ui.info_cursor) {
+        if (i == ui.info_cursor)
             oled_text(0, row, ">");
-            for (int x = 0; x < OLED_W; x++) oled_set_pixel(x, row * 8 + 7, true);
-        }
     }
-    oled_text(0, 7, "UP/DN SEL pick");
+    oled_text(0, 7, UI_H_UPDN " " UI_H_SEL " pick");
     oled_flush();
 }
 
 /* ---- Render: PAIR_NEW ---------------------------------------------- */
+
+/* Ping-pong dot position (0 .. UI_BOUNCE_CELLS-1), bouncing off both
+ * ends.  Triangle wave over time so it's deterministic from `now` with
+ * no stored state. */
+static uint8_t bounce_pos(uint64_t now) {
+    int      span = UI_BOUNCE_CELLS - 1;
+    uint64_t ph   = (now / UI_BOUNCE_STEP_US) % (uint64_t)(2 * span);
+    return (uint8_t)((ph < (uint64_t)span) ? ph : (2 * span - ph));
+}
 
 static void render_pair_new(void) {
     oled_clear();
@@ -422,7 +435,7 @@ static void render_pair_new(void) {
         char line[BT_EVT_NAME_MAX + 2];
         snprintf(line, sizeof(line), "%s", ui.pair_name);
         oled_text(0, 4, line);
-        oled_text(0, 7, "SEL: done");
+        oled_text(0, 7, UI_H_SEL ": done");
         oled_flush();
         return;
     }
@@ -430,7 +443,7 @@ static void render_pair_new(void) {
     if (bt_events_active_count() >= BT_ACTIVE_CAP) {
         oled_text(0, 3, "All slots full.");
         oled_text(0, 4, "Forget one first.");
-        oled_text(0, 7, "SEL: cancel");
+        oled_text(0, 7, UI_H_SEL ": cancel");
         oled_flush();
         return;
     }
@@ -438,15 +451,21 @@ static void render_pair_new(void) {
     uint64_t now = time_us_64();
     int secs = (ui.pair_deadline_us > now)
              ? (int)((ui.pair_deadline_us - now) / 1000000ull) : 0;
-    static const char spin[4] = { '|', '/', '-', '\\' };
-    uint8_t spin_idx = (uint8_t)((now / 250000ull) & 3);
 
     char hdr[22];
-    snprintf(hdr, sizeof(hdr), "%c Scanning  %2ds", spin[spin_idx], secs);
+    snprintf(hdr, sizeof(hdr), "Scanning   %2ds", secs);
     oled_text(0, 3, hdr);
+
+    /* Ping-pong dot: bounces left/right across a blank field. */
+    char bar[UI_BOUNCE_CELLS + 1];
+    for (int i = 0; i < UI_BOUNCE_CELLS; i++) bar[i] = ' ';
+    bar[bounce_pos(now)] = OLED_CH_SEL;
+    bar[UI_BOUNCE_CELLS] = '\0';
+    oled_text(0, 4, bar);
+
     oled_text(0, 5, "Put device in");
     oled_text(0, 6, "pairing mode now.");
-    oled_text(0, 7, "SEL: cancel");
+    oled_text(0, 7, UI_H_SEL ": cancel");
     oled_flush();
 }
 
@@ -467,12 +486,10 @@ static void render_confirm(const char *line1, const char *line2) {
     for (int i = 0; i < CONFIRM__COUNT; i++) {
         int row = 5 + i;
         oled_text(6, row, opts[i]);
-        if (i == ui.confirm_cursor) {
+        if (i == ui.confirm_cursor)
             oled_text(0, row, ">");
-            for (int x = 0; x < OLED_W; x++) oled_set_pixel(x, row * 8 + 7, true);
-        }
     }
-    oled_text(0, 7, "UP/DN SEL pick");
+    oled_text(0, 7, UI_H_UPDN " " UI_H_SEL " pick");
     oled_flush();
 }
 
@@ -625,10 +642,10 @@ static bool pair_new_tick(void) {
         return false;
     }
     uint8_t secs = (uint8_t)((ui.pair_deadline_us - now) / 1000000ull);
-    uint8_t spin = (uint8_t)((now / 250000ull) & 3);
-    bool changed = (secs != ui.last_pair_secs) || (spin != ui.last_pair_spin);
+    uint8_t pos  = bounce_pos(now);   /* ping-pong dot cell */
+    bool changed = (secs != ui.last_pair_secs) || (pos != ui.last_pair_spin);
     ui.last_pair_secs = secs;
-    ui.last_pair_spin = spin;
+    ui.last_pair_spin = pos;
     return changed;
 }
 

@@ -56,7 +56,8 @@ static bool    panel_present = false;
  * column blanked to give 1 px of inter-character spacing.  ASCII below
  * 0x20 and above 0x7E render as blank (handled in oled_text).
  */
-static const uint8_t font6x8[96][6] = {
+/* ASCII 0x20..0x7F (96 glyphs) + 3 custom UI glyphs 0x80..0x82. */
+static const uint8_t font6x8[99][6] = {
     {0x00,0x00,0x00,0x00,0x00,0x00}, /* 0x20 ' ' */
     {0x00,0x00,0x5F,0x00,0x00,0x00}, /* 0x21 '!' */
     {0x00,0x07,0x00,0x07,0x00,0x00}, /* 0x22 '"' */
@@ -153,7 +154,12 @@ static const uint8_t font6x8[96][6] = {
     {0x00,0x41,0x36,0x08,0x00,0x00}, /* 0x7D '}' */
     {0x08,0x04,0x08,0x10,0x08,0x00}, /* 0x7E '~' */
     {0x40,0x00,0x40,0x00,0x40,0x00}, /* 0x7F single-cell ellipsis "…" */
+    /* ---- Custom UI glyphs, 0x80.. (button hints) ---- */
+    {0x08,0x0C,0x3E,0x0C,0x08,0x00}, /* 0x80 up-arrow   (UP button)   */
+    {0x08,0x18,0x3E,0x18,0x08,0x00}, /* 0x81 down-arrow (DOWN button) */
+    {0x1C,0x22,0x22,0x22,0x1C,0x00}, /* 0x82 circle     (SELECT btn)  */
 };
+#define FONT_LAST_CH 0x82
 
 
 /* ---- I2C primitives -------------------------------------------------- */
@@ -333,7 +339,7 @@ void oled_text(int x_pixels, int row, const char *s) {
     int x = x_pixels;
     while (*s) {
         unsigned char c = (unsigned char)*s++;
-        if (c < 0x20 || c > 0x7F) c = 0x7F;  /* render as blank */
+        if (c < 0x20 || c > FONT_LAST_CH) c = 0x20;  /* out of range -> space */
         const uint8_t *glyph = font6x8[c - 0x20];
         for (int col = 0; col < 6; col++) {
             if (x < 0 || x >= OLED_W) { x++; continue; }
@@ -359,7 +365,7 @@ void oled_text_at(int x_pixels, int y_pixels, int scale, const char *s) {
     int x = x_pixels;
     while (*s) {
         unsigned char c = (unsigned char)*s++;
-        if (c < 0x20 || c > 0x7F) c = 0x7F;
+        if (c < 0x20 || c > FONT_LAST_CH) c = 0x20;
         const uint8_t *glyph = font6x8[c - 0x20];
         for (int gc = 0; gc < 6; gc++) {
             uint8_t col_bits = glyph[gc];
