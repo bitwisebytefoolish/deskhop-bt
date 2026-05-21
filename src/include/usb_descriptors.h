@@ -25,6 +25,49 @@
 // Interface 2
 #define REPORT_ID_VENDOR 6
 
+// Interface 0 (gamepad, #24)
+#define REPORT_ID_GAMEPAD 8
+
+/* Custom gamepad report descriptor (#24).  Mirrors gamepad_report_t:
+ *   4 analog axes (X, Y, Z, Rz), 8-bit signed   = 4 bytes
+ *   1 hat switch (dpad), 4-bit + 4-bit padding   = 1 byte
+ *   16 buttons, 1-bit each                       = 2 bytes
+ * Total 7 bytes (+ report ID) — fits the 8-byte UART payload. */
+#define TUD_HID_REPORT_DESC_GAMEPAD_DH(...) \
+  HID_USAGE_PAGE ( HID_USAGE_PAGE_DESKTOP     )                   ,\
+  HID_USAGE      ( HID_USAGE_DESKTOP_GAMEPAD  )                   ,\
+  HID_COLLECTION ( HID_COLLECTION_APPLICATION )                   ,\
+    __VA_ARGS__ \
+    HID_USAGE_PAGE   ( HID_USAGE_PAGE_DESKTOP )                   ,\
+    HID_USAGE        ( HID_USAGE_DESKTOP_X    )                   ,\
+    HID_USAGE        ( HID_USAGE_DESKTOP_Y    )                   ,\
+    HID_USAGE        ( HID_USAGE_DESKTOP_Z    )                   ,\
+    HID_USAGE        ( HID_USAGE_DESKTOP_RZ   )                   ,\
+    HID_LOGICAL_MIN  ( 0x81                   )                   ,\
+    HID_LOGICAL_MAX  ( 0x7f                   )                   ,\
+    HID_REPORT_SIZE  ( 8                      )                   ,\
+    HID_REPORT_COUNT ( 4                      )                   ,\
+    HID_INPUT        ( HID_DATA | HID_VARIABLE | HID_ABSOLUTE )   ,\
+    HID_USAGE        ( HID_USAGE_DESKTOP_HAT_SWITCH )             ,\
+    HID_LOGICAL_MIN  ( 0                      )                   ,\
+    HID_LOGICAL_MAX  ( 7                      )                   ,\
+    HID_REPORT_SIZE  ( 4                      )                   ,\
+    HID_REPORT_COUNT ( 1                      )                   ,\
+    HID_INPUT        ( HID_DATA | HID_VARIABLE | HID_ABSOLUTE )   ,\
+    HID_REPORT_SIZE  ( 4                      )                   ,\
+    HID_REPORT_COUNT ( 1                      )                   ,\
+    HID_INPUT        ( HID_CONSTANT           )                   ,\
+    HID_USAGE_PAGE   ( HID_USAGE_PAGE_BUTTON  )                   ,\
+    HID_USAGE_MIN    ( 1                      )                   ,\
+    HID_USAGE_MAX    ( 16                     )                   ,\
+    HID_LOGICAL_MIN  ( 0                      )                   ,\
+    HID_LOGICAL_MAX  ( 1                      )                   ,\
+    HID_REPORT_SIZE  ( 1                      )                   ,\
+    HID_REPORT_COUNT ( 16                     )                   ,\
+    HID_INPUT        ( HID_DATA | HID_VARIABLE | HID_ABSOLUTE )   ,\
+  HID_COLLECTION_END \
+
+
 
 #define DEVICE_DESCRIPTOR(vid, pid) \
 {.bLength         = sizeof(tusb_desc_device_t),\

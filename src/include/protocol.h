@@ -28,6 +28,7 @@ enum packet_type_e {
     GAMING_MODE_MSG      = 13,
     CONSUMER_CONTROL_MSG = 14,
     SYSTEM_CONTROL_MSG   = 15,
+    GAMEPAD_REPORT_MSG   = 16,  /* #24 — packed gamepad_report_t (7 B) */
     SAVE_CONFIG_MSG      = 18,
     REBOOT_MSG           = 19,
     GET_VAL_MSG          = 20,

@@ -62,6 +62,7 @@ const uart_handler_t uart_handler[] = {
     /* Core functions */
     {.type = KEYBOARD_REPORT_MSG, .handler = handle_keyboard_uart_msg},
     {.type = MOUSE_REPORT_MSG, .handler = handle_mouse_abs_uart_msg},
+    {.type = GAMEPAD_REPORT_MSG, .handler = handle_gamepad_uart_msg},
     {.type = OUTPUT_SELECT_MSG, .handler = handle_output_select_msg},
 
     /* Box control */

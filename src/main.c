@@ -65,6 +65,7 @@ int main(void) {
         [1] = {.exec = &kick_watchdog_task,       .frequency = _HZ(30)},     // | Verify core1 is still running and if so, reset watchdog timer
         [2] = {.exec = &process_kbd_queue_task,   .frequency = _HZ(2000)},   // | Check if there were any keypresses and send them
         [3] = {.exec = &process_mouse_queue_task, .frequency = _HZ(2000)},   // | Check if there were any mouse movements and send them
+        [10] = {.exec = &process_gamepad_queue_task, .frequency = _HZ(2000)}, // | Drain gamepad reports to USB (#24)
         [4] = {.exec = &process_hid_queue_task,   .frequency = _HZ(1000)},   // | Check if there are any packets to send over vendor link
         [5] = {.exec = &process_uart_tx_task,     .frequency = _TOP()},      // | Check if there are any packets to send over UART
         [6] = {.exec = &led_apply_task,           .frequency = _HZ(100)},    // | Apply pending onboard-LED changes (drains state->onboard_led_dirty; cyw43_arch_gpio_put on Pico 2 W, gpio_put on Pico)

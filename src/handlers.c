@@ -187,6 +187,12 @@ void handle_mouse_abs_uart_msg(uart_packet_t *packet, device_t *state) {
     state->last_activity[BOARD_ROLE] = time_us_64();
 }
 
+/* Function handles received gamepad reports from the other board (#24) */
+void handle_gamepad_uart_msg(uart_packet_t *packet, device_t *state) {
+    queue_gamepad_report((gamepad_report_t *)packet->data, state);
+    state->last_activity[BOARD_ROLE] = time_us_64();
+}
+
 /* Function handles request to switch output  */
 void handle_output_select_msg(uart_packet_t *packet, device_t *state) {
     state->active_output = packet->data[0];

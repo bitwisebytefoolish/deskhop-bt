@@ -40,6 +40,19 @@ typedef struct TU_ATTR_PACKED {
     uint8_t mode;
 } mouse_report_t;
 
+/* Generic gamepad report (#24).  Packed to 7 bytes so it fits the 8-byte
+ * UART payload (PACKET_DATA_LENGTH) without fragmentation.  Matches the
+ * custom TUD_HID_REPORT_DESC_GAMEPAD_DH descriptor on the output peer:
+ * 4 analog axes, a 4-bit hat (dpad), and 16 buttons. */
+typedef struct TU_ATTR_PACKED {
+    int8_t   lx;       // left stick X   (-127..127)
+    int8_t   ly;       // left stick Y
+    int8_t   rx;       // right stick X
+    int8_t   ry;       // right stick Y
+    uint8_t  hat;      // dpad: 0..7 clockwise from north, 8 = centered
+    uint16_t buttons;  // 16 buttons (bit0 = button 1)
+} gamepad_report_t;
+
 typedef struct {
     uint8_t tip_pressure;
     uint8_t buttons; // Digitizer buttons
@@ -112,6 +125,7 @@ typedef struct {
     queue_t hid_queue_out; // Queue that stores outgoing hid messages
     queue_t kbd_queue;     // Queue that stores keyboard reports
     queue_t mouse_queue;   // Queue that stores mouse reports
+    queue_t gamepad_queue; // Queue that stores gamepad reports (#24)
     queue_t uart_tx_queue; // Queue that stores outgoing packets
 
     hid_interface_t iface[MAX_DEVICES][MAX_INTERFACES]; // Store info about HID interfaces

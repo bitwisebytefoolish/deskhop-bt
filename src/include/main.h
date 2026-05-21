@@ -38,6 +38,7 @@
 #include "handlers.h"
 #include "keyboard.h"
 #include "mouse.h"
+#include "gamepad.h"
 #include "packet.h"
 #include "pinout.h"
 #include "screen.h"
