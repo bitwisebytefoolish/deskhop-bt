@@ -55,12 +55,6 @@ void buttons_init(void);
  * FIFO order.  Called from the UI task. */
 bool buttons_poll(button_event_t *out);
 
-/* Diagnostic: poll raw pin levels (latching lows) + print levels and
- * IRQ edge counters once a second.  Call EVERY UI frame (~30 Hz) so
- * the latch catches brief presses the 1 Hz print would miss.  Used
- * during button bring-up (#22 Phase 2). */
-void buttons_debug_tick(void);
-
 #else  /* DH_OLED_UI not defined — stubs */
 
 typedef struct { int _unused; } button_event_t;

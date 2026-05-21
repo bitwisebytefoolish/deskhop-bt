@@ -13,20 +13,9 @@
 
 #ifdef DH_OLED_UI
 
-#include <stdio.h>
 #include "hardware/gpio.h"
 #include "buttons.h"
 #include "pinout.h"
-
-/* ---- Diagnostics (issue #22 button bring-up) -------------------------
- * Edge counters incremented in the IRQ; raw levels read on demand.
- * Printed from the UI task (normal context) — never printf() from the
- * IRQ itself, which can deadlock on the pico-sdk stdio mutex if the
- * foreground code is mid-print. */
-volatile uint32_t buttons_dbg_fall[BTN__COUNT];
-volatile uint32_t buttons_dbg_rise[BTN__COUNT];
-volatile uint32_t buttons_dbg_irq_total;
-volatile uint32_t buttons_dbg_unmatched;  /* IRQs whose GPIO didn't map to a button */
 
 /* ---- Pin ↔ button mapping --------------------------------------------
  * Index by button_id_t.  Single source of truth: pinout.h's
@@ -40,7 +29,14 @@ static const uint8_t button_pins[BTN__COUNT] = {
 
 /* ---- Per-button state owned by the ISR ----------------------------- */
 
-#define DEBOUNCE_US      20000   /* 20 ms — ignore edges closer than this */
+#define DEBOUNCE_US       6000   /* 6 ms — ignore edges closer than this.
+                                  * Lower than the classic 20 ms because the
+                                  * event is emitted on RELEASE: with 20 ms a
+                                  * quick tap whose release edge fell inside
+                                  * the window got debounced away, so the
+                                  * button felt unresponsive to fast presses.
+                                  * 6 ms still comfortably rejects the 1-3 ms
+                                  * mechanical bounce of these tactiles. */
 #define LONG_PRESS_US   500000   /* 500 ms threshold for click-vs-long */
 
 typedef struct {
@@ -80,12 +76,8 @@ static int8_t pin_to_button(uint gpio) {
 }
 
 static void gpio_irq_callback(uint gpio, uint32_t events) {
-    buttons_dbg_irq_total++;
     int8_t b = pin_to_button(gpio);
-    if (b < 0) { buttons_dbg_unmatched++; return; }  /* not one of our pins */
-
-    if (events & GPIO_IRQ_EDGE_FALL) buttons_dbg_fall[b]++;
-    if (events & GPIO_IRQ_EDGE_RISE) buttons_dbg_rise[b]++;
+    if (b < 0) return;  /* not one of our pins */
 
     uint64_t now = time_us_64();
 
@@ -144,20 +136,6 @@ void buttons_init(void) {
                 GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true);
         }
     }
-
-    /* One-time readback so the UART log proves the firmware-side pull
-     * config actually took.  If this prints pu=1 pd=0 for every pin
-     * but a multimeter still reads ~0 V at idle, the pull-down is
-     * external (wiring) — not us.  If it prints pu=0, the pico-sdk
-     * call didn't stick and the bug is here. */
-    for (int i = 0; i < BTN__COUNT; i++) {
-        uint8_t pin = button_pins[i];
-        printf("[btn] init pin GP%u: dir=in pu=%d pd=%d level=%d\n",
-               pin,
-               gpio_is_pulled_up(pin),
-               gpio_is_pulled_down(pin),
-               gpio_get(pin));
-    }
 }
 
 bool buttons_poll(button_event_t *out) {
@@ -165,49 +143,6 @@ bool buttons_poll(button_event_t *out) {
     *out = ring[ring_tail];
     ring_tail = (uint8_t)((ring_tail + 1) % BTN_RING_CAP);
     return true;
-}
-
-void buttons_debug_tick(void) {
-    /* Called every UI frame (~30 Hz).  Polls the raw pin levels and
-     * LATCHES whether each was ever seen low since the last printed
-     * report — the once-a-second print alone is too coarse to catch a
-     * brief button press, but polling at 30 Hz reliably samples a
-     * normal human press (50-200 ms low).
-     *
-     * Decision matrix (compare seenlow vs the IRQ edge counters):
-     *   seenlow stays 0 on a press   -> WIRING.  The line never pulls
-     *       to GND: button not connected, wrong pin, or no ground
-     *       path.  The IRQ/queue are irrelevant until this flips.
-     *   seenlow flips 1 but fall=0   -> IRQ NOT FIRING.  The level
-     *       changes but the GPIO IRQ callback isn't invoked — our
-     *       gpio_set_irq_enabled_with_callback got displaced (a
-     *       later registrant on this core wins), or the IRQ was
-     *       disabled.  Fix = poll instead of IRQ, or re-register.
-     *   seenlow + fall both move but no [btn] event line elsewhere
-     *       -> debounce / queue / classification bug in this file. */
-    static uint8_t  seen_low[BTN__COUNT];
-    static uint32_t tick;
-
-    if (!gpio_get(UI_BUTTON_UP))     seen_low[BTN_UP]     = 1;
-    if (!gpio_get(UI_BUTTON_DOWN))   seen_low[BTN_DOWN]   = 1;
-    if (!gpio_get(UI_BUTTON_SELECT)) seen_low[BTN_SELECT] = 1;
-
-    if (++tick < 30) return;
-    tick = 0;
-
-    printf("[btn] now U/D/S=%d/%d/%d  seenlow=%d/%d/%d  fall=%lu/%lu/%lu  rise=%lu/%lu/%lu  irq=%lu unm=%lu\n",
-           gpio_get(UI_BUTTON_UP), gpio_get(UI_BUTTON_DOWN), gpio_get(UI_BUTTON_SELECT),
-           seen_low[BTN_UP], seen_low[BTN_DOWN], seen_low[BTN_SELECT],
-           (unsigned long)buttons_dbg_fall[BTN_UP],
-           (unsigned long)buttons_dbg_fall[BTN_DOWN],
-           (unsigned long)buttons_dbg_fall[BTN_SELECT],
-           (unsigned long)buttons_dbg_rise[BTN_UP],
-           (unsigned long)buttons_dbg_rise[BTN_DOWN],
-           (unsigned long)buttons_dbg_rise[BTN_SELECT],
-           (unsigned long)buttons_dbg_irq_total,
-           (unsigned long)buttons_dbg_unmatched);
-
-    seen_low[BTN_UP] = seen_low[BTN_DOWN] = seen_low[BTN_SELECT] = 0;
 }
 
 #endif /* DH_OLED_UI */
